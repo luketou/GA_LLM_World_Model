@@ -1,1 +1,108 @@
-test
+
+# 📜 目標  
+打造一套「LLM Agent ( LangGraph ) + Graph-GA 生成 + World Model + Risk Gate」完整工作流，  
+可在 **GuacaMol benchmark_suites** 任務上評測分子設計表現，並支援閉環 Oracle 精評，並設定oracle 只有500次，同時要實時追蹤llmgenerator 和GB_GA_generate oracle 累積。  
+程式語言 **Python 3.9**；核心框架 **PyTorch 2**、**PyTorch Geometric 2**、**RDKit**、**LangGraph**。  
+所有指令可直接在 *nix shell 內一次執行，無需手動修改任何路徑。  
+
+# 📂 檔案結構  
+- `agent/`
+  - `llm_agent.py`          ← LangGraph LLM Agent：負責 prompt-planning、Few-shot、錯誤反饋  
+  - `graph_ga_wrapper.py`   ← 包裝 BenevolentAI **GB_GA_generate**（透過 `pip install guacamol_baselines` 取得）  
+  - `policy.py`             ← Meta-controller：基於歷史得分決定採用 LLM 還是 Graph-GA  
+- `world_model/`
+  - `data_utils.py`         ← SMILES → 2D/3D/motif 特徵圖  
+  - `encoder.py`            ← Uni-Mol 風格 SE(3)-Transformer（可載預訓練權重）  
+  - `task_encoder.py`       ← one-hot + 連續門檻 + 運算符 Embedding → 128-dim  
+  - `heads.py`              ← 合成 / 性質 / 毒性 / 量子 多頭 + MC-Dropout σ  
+  - `gate.py`               ← Risk Gate (MLP)：輸出 `[0,1]` risk  
+  - `planner.py`            ← Retrosynthesis stub（Transformer + MCTS，可後續替換）  
+  - `config.py`             ← 超參、權重、門檻設定  
+- `oracle/`
+  - `dft_proxy.py`          ← 佔位：用高階 ML (Chemprop) 模擬昂貴 DFT；易於改成真 DFT/實驗  
+- `training/`
+  - `train_pretrain.py`     ← 自監督預訓練 (遮蔽、對比、3D 重建)  
+  - `train_finetune.py`     ← 多頭弱監督微調  
+- `benchmark/`
+  - `guacamol_runner.py`    ← 與 `guacamol.benchmark_suites` 對接，一鍵跑全套任務  
+- `inference.py`            ← 給 SMILES + Task Descriptor → world model → risk / 預測  
+- `README.md`               ← 安裝、範例指令、結果說明  
+
+# 🏗️ 實作細節  
+## 1. LangGraph LLM Agent (`agent/llm_agent.py`)  
+```python
+class LangGraphAgent:
+    """
+    - 使用 LangGraph DAG：節點包含 Planner, LLM (GPT-3.5/4), Critic
+    - 支援 'plan-execute-reflect' 迴圈
+    - 方法 generate(n, task_emb) -> List[smiles]
+    """
+
+2. Graph-GA 包裝 (agent/graph_ga_wrapper.py)
+	•	直接
+
+from guacamol_baselines.graph_ga.goal_directed_generation import GB_GA_generate
+
+
+	•	函式 ga_generate(n, scoring_function) -> List[smiles]
+
+3. Meta Policy (agent/policy.py)
+	•	Glues LangGraphAgent & ga_generate
+	•	多臂 bandit：根據近期 50 個候選平均 risk × GuacaMol score，動態選擇生成器
+
+4. World Model：同前回答，但 task_encoder.py 加上
+
+# 支援 benchmark_suites:
+from guacamol.benchmark_suites import goal_directed_benchmark_suite
+TASK_LIST = [b.name for b in goal_directed_benchmark_suite()]
+
+5. 風險 Gate (world_model/gate.py)
+
+risk = sigmoid( w1*(1-p_synth) + w2*p_tox + w3*σ_sum + w4*cost_norm + w5*novelty )
+
+novelty = 1 - max cosine similarity 與歷史 top-k 嵌入
+
+6. Benchmark Runner (benchmark/guacamol_runner.py)
+	1.	載入 goal_directed_benchmark_suite() 提供的所有任務
+	2.	對每個任務：
+	•	產生 Task Descriptor → Task Embedding
+	•	agent.policy.next_generator() 產生候選 → world_model → Gate → 若 risk≤τ → GuacaMol scoring fn
+	3.	記錄分子數、平均 Oracle 次數、最終分數
+
+7. 依賴安裝 (README 範例)
+
+conda create -n molwm python=3.9 && conda activate molwm
+pip install torch==2.* torch_geometric==2.* rdkit-pypi \
+            guacamol==0.5.2 guacamol-baselines langgraph==0.4.*
+
+8. 一鍵指令
+	•	預訓練：python training/train_pretrain.py --epochs 50
+	•	微調 ：python training/train_finetune.py --epochs 30
+	•	單 SMILES 測試：
+
+python inference.py \
+   --smiles "CC1=CC(=O)NC(=O)N1" \
+   --task_name "logP" --op ">=" --value 2.5
+
+
+	•	跑 GuacaMol 全任務：
+
+python benchmark/guacamol_runner.py --oracle_budget 200
+
+
+
+🖋️ 輸出格式說明
+
+請 Codex 依下列格式一次生成所有檔案：
+
+===== <relative_path/filename.py> =====
+<code>
+
+其中 <code> 為可直接執行的完整程式；stub 段以 TODO: 註解標示。
+
+ 期望結果
+	•	執行 python benchmark/guacamol_runner.py：整體得分 ≥ 官方 random baseline；Oracle 召喚次數 ≤ --oracle_budget。
+	•	所有單元測試與 python -m pytest 過關。
+
+ 開始生成 全部檔案！
+
