@@ -59,7 +59,10 @@ async def run():
     iteration = 0
     
     try:
-        async for state in graph_app.astream(init_state):
+        # 配置檢查點所需的參數
+        config = {"configurable": {"thread_id": "main_thread"}}
+        
+        async for state in graph_app.astream(init_state, config=config):
             iteration += 1
             logger.info(f"[Workflow] Iteration {iteration}")
             
