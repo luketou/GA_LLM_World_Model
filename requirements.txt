@@ -8,3 +8,7 @@ numpy
 pandas
 pyyaml
 tqdm
+torch
+torchvision
+torchaudio
+cerebras-cloud-sdk

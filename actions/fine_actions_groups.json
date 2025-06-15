@@ -1,0 +1,212 @@
+[
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "methyl",
+            "smiles": "C"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "ethyl",
+            "smiles": "CC"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "propyl",
+            "smiles": "CCC"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "hydroxyl",
+            "smiles": "O"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "amino",
+            "smiles": "N"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "carboxyl",
+            "smiles": "C(=O)O"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "methoxy",
+            "smiles": "OC"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "fluoro",
+            "smiles": "F"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "chloro",
+            "smiles": "Cl"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "bromo",
+            "smiles": "Br"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "nitro",
+            "smiles": "N(=O)=O"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "cyano",
+            "smiles": "C#N"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "phenyl",
+            "smiles": "c1ccccc1"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "benzyl",
+            "smiles": "Cc1ccccc1"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "trifluoromethyl",
+            "smiles": "C(F)(F)F"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "acetyl",
+            "smiles": "C(=O)C"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "sulfonyl",
+            "smiles": "S(=O)(=O)"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "pyridyl",
+            "smiles": "c1ccncc1"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "thiophene",
+            "smiles": "c1ccsc1"
+        }
+    },
+    {
+        "type": "substitute",
+        "params": {
+            "fragment": "furan",
+            "smiles": "c1ccoc1"
+        }
+    },
+    {
+        "type": "add_ring",
+        "params": {
+            "ring_type": "cyclopropyl",
+            "smiles": "C1CC1"
+        }
+    },
+    {
+        "type": "add_ring",
+        "params": {
+            "ring_type": "cyclobutyl",
+            "smiles": "C1CCC1"
+        }
+    },
+    {
+        "type": "add_ring",
+        "params": {
+            "ring_type": "cyclopentyl",
+            "smiles": "C1CCCC1"
+        }
+    },
+    {
+        "type": "add_ring",
+        "params": {
+            "ring_type": "cyclohexyl",
+            "smiles": "C1CCCCC1"
+        }
+    },
+    {
+        "type": "add_ring",
+        "params": {
+            "ring_type": "pyrrolidine",
+            "smiles": "C1CCNC1"
+        }
+    },
+    {
+        "type": "add_ring",
+        "params": {
+            "ring_type": "piperidine",
+            "smiles": "C1CCNCC1"
+        }
+    },
+    {
+        "type": "add_ring",
+        "params": {
+            "ring_type": "morpholine",
+            "smiles": "C1COCCN1"
+        }
+    },
+    {
+        "type": "add_ring",
+        "params": {
+            "ring_type": "imidazole",
+            "smiles": "c1c[nH]cn1"
+        }
+    },
+    {
+        "type": "add_ring",
+        "params": {
+            "ring_type": "oxazole",
+            "smiles": "c1ccon1"
+        }
+    },
+    {
+        "type": "add_ring",
+        "params": {
+            "ring_type": "thiazole",
+            "smiles": "c1ccsn1"
+        }
+    }
+]

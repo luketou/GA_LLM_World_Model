@@ -1,0 +1,19 @@
+name: agent
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - numpy
+  - pandas
+  - pyyaml
+  - tqdm
+  - rdkit
+  - neo4j>=5.17
+  - langchain-openai>=0.0.24
+  - langgraph>=0.0.19
+  - langsmith>=0.1.2
+  - pip:
+    - guacamol==0.5.4
+    - cerebras-cloud-sdk
