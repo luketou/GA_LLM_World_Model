@@ -32,10 +32,11 @@ langsmith:
   project: mol-agent-v1
   api_key: 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
 
-# Knowledge Graph 設定
+# Knowledge Graph 設定 (可選，如果無法連接會使用內存存儲)
 kg:
   backend: neo4j
   uri: bolt://localhost:7687
   user: neo4j
   password: !ENV ${NEO4J_PASSWORD}
   database: neo4j
+  enabled: false  # 在遠端 cluster 上禁用 Neo4j

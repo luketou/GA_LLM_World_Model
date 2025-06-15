@@ -139,9 +139,48 @@ class GuacaMolOracle:
             raise ValueError(f"No valid SMILES found in {smi_file}")
         
         print(f"[Prescan] Evaluating {len(smiles_all)} SMILES from {smi_file}")
-        scores = self.benchmark.score_list(smiles_all)
-        idx_low = scores.index(min(scores))
         
+        # 限制 prescan 的 SMILES 數量以提高速度
+        if len(smiles_all) > 1000:
+            print(f"[Prescan] Too many SMILES ({len(smiles_all)}), sampling 1000 for prescan")
+            import random
+            smiles_all = random.sample(smiles_all, 1000)
+        
+        # 使用 GuacaMol benchmark 的評分方法
+        try:
+            # 嘗試使用 objective 屬性進行逐一評分
+            if hasattr(self.benchmark, 'objective') and hasattr(self.benchmark.objective, 'score'):
+                scores = []
+                for smiles in smiles_all:
+                    try:
+                        score = self.benchmark.objective.score(smiles)
+                        scores.append(score)
+                    except Exception as e:
+                        print(f"[Prescan] Error scoring {smiles}: {e}")
+                        scores.append(0.0)
+            elif hasattr(self.benchmark, 'score_list'):
+                scores = self.benchmark.score_list(smiles_all)
+            elif hasattr(self.benchmark, 'score'):
+                # 使用單一評分方法逐一評分
+                scores = [self.benchmark.score(smiles) for smiles in smiles_all]
+            else:
+                # 最後回退：返回默認分數
+                print(f"[Prescan] No suitable scoring method found, using default scores")
+                scores = [0.0] * len(smiles_all)
+                
+        except Exception as e:
+            print(f"[Prescan] Error during scoring: {e}")
+            print(f"[Prescan] Benchmark type: {type(self.benchmark)}")
+            print(f"[Prescan] Available methods: {[attr for attr in dir(self.benchmark) if not attr.startswith('_')]}")
+            
+            # 嘗試檢查 objective 的方法
+            if hasattr(self.benchmark, 'objective'):
+                print(f"[Prescan] Objective methods: {[attr for attr in dir(self.benchmark.objective) if not attr.startswith('_')]}")
+            
+            # 回退：選擇第一個 SMILES 作為種子
+            return smiles_all[0], 0.0
+        
+        idx_low = scores.index(min(scores))
         return smiles_all[idx_low], scores[idx_low]
 
     # ---------- Async scoring ---------- #
@@ -150,7 +189,7 @@ class GuacaMolOracle:
         """
         非同步評分：
         - 檢查配額、令牌桶
-        - 呼叫 benchmark.score_list
+        - 呼叫 benchmark 評分方法
         - 寫入 score_log.csv（欄位：epoch, smiles, score）
         """
         if self.calls_left <= 0:
@@ -167,9 +206,40 @@ class GuacaMolOracle:
         current_epoch = epoch if epoch is not None else self.epoch
         
         loop = asyncio.get_event_loop()
+        
+        # 定義評分函數
+        def score_molecules():
+            try:
+                # 嘗試使用 objective 屬性進行逐一評分
+                if hasattr(self.benchmark, 'objective') and hasattr(self.benchmark.objective, 'score'):
+                    scores = []
+                    for s in smiles:
+                        try:
+                            score = self.benchmark.objective.score(s)
+                            scores.append(score)
+                        except Exception as e:
+                            print(f"[Oracle] Error scoring {s}: {e}")
+                            scores.append(0.0)
+                    return scores
+                elif hasattr(self.benchmark, 'score_list'):
+                    return self.benchmark.score_list(smiles)
+                elif hasattr(self.benchmark, 'score'):
+                    # 使用單一評分方法逐一評分
+                    return [self.benchmark.score(s) for s in smiles]
+                else:
+                    # 最後回退：返回默認分數
+                    print(f"[Oracle] No suitable scoring method found, using default scores")
+                    return [0.0] * len(smiles)
+            except Exception as e:
+                print(f"[Oracle] Scoring error: {e}")
+                print(f"[Oracle] Benchmark type: {type(self.benchmark)}")
+                print(f"[Oracle] Available methods: {[attr for attr in dir(self.benchmark) if not attr.startswith('_')]}")
+                # 返回默認分數
+                return [0.0] * len(smiles)
+        
         scores = await loop.run_in_executor(
             self.executor,
-            functools.partial(self.benchmark.score_list, smiles)
+            score_molecules
         )
 
         # CSV logging

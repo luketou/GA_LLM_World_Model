@@ -77,47 +77,64 @@ class LLMGenerator:
     @traceable(name="LLM::generate_batch")
     def generate_batch(self,
                        parent_smiles: str,
-                       actions: List[Dict[str, Any]]) -> List[str]:
+                       actions: List[Dict[str, Any]],
+                       max_retries: int = 3) -> List[str]:
         """
         批次生成介面：
         - 組裝 system + action messages  
         - 呼叫 LLM
         - 解析並驗證 SMILES 列表
+        - 如果生成數量不足，重新嘗試生成補齊
         - 回傳合法 SMILES
         """
-        try:
-            # 創建消息
-            messages = create_llm_messages(parent_smiles, actions)
-            
-            # 呼叫 LLM
-            response = self.client(messages)
-            
-            # 解析回應
-            if hasattr(response, 'content'):
-                response_content = response.content
-            else:
-                response_content = str(response)
-            
-            smiles_list = self._parse_response(response_content)
-            
-            # 基本檢查 SMILES
-            basic_smiles = self._basic_smiles_check(smiles_list)
-            
-            logger.info(f"Generated {len(basic_smiles)} SMILES from {len(actions)} actions (no RDKit validation)")
-            
-            # 確保返回的 SMILES 數量與 actions 數量相符
-            if len(basic_smiles) < len(actions):
-                logger.warning(f"Generated fewer SMILES ({len(basic_smiles)}) than actions ({len(actions)})")
-                # 用父分子填充不足的部分作為回退
-                while len(basic_smiles) < len(actions):
-                    basic_smiles.append(parent_smiles)
-            
-            return basic_smiles[:len(actions)]  # 確保不超過 actions 數量
-            
-        except Exception as e:
-            logger.error(f"Error in generate_batch: {e}")
-            # 回退：返回父分子的副本
-            return [parent_smiles] * len(actions)
+        target_count = len(actions)
+        all_valid_smiles = []
+        retry_count = 0
+        
+        while len(all_valid_smiles) < target_count and retry_count < max_retries:
+            try:
+                # 計算還需要生成多少個
+                remaining_actions = actions[len(all_valid_smiles):]
+                
+                # 創建消息
+                messages = create_llm_messages(parent_smiles, remaining_actions)
+                
+                # 呼叫 LLM
+                response = self.client(messages)
+                
+                # 解析回應
+                if hasattr(response, 'content'):
+                    response_content = response.content
+                else:
+                    response_content = str(response)
+                
+                smiles_list = self._parse_response(response_content)
+                
+                # 基本檢查 SMILES
+                basic_smiles = self._basic_smiles_check(smiles_list)
+                
+                # 添加有效的 SMILES
+                all_valid_smiles.extend(basic_smiles)
+                
+                logger.info(f"Retry {retry_count + 1}: Generated {len(basic_smiles)} valid SMILES, total: {len(all_valid_smiles)}/{target_count}")
+                
+                retry_count += 1
+                
+            except Exception as e:
+                logger.error(f"Error in generate_batch (retry {retry_count + 1}): {e}")
+                retry_count += 1
+        
+        # 如果仍然不足，用父分子填充
+        if len(all_valid_smiles) < target_count:
+            logger.warning(f"Generated fewer SMILES ({len(all_valid_smiles)}) than actions ({target_count}) after {max_retries} retries")
+            while len(all_valid_smiles) < target_count:
+                all_valid_smiles.append(parent_smiles)
+        
+        # 確保返回的 SMILES 數量與 actions 數量相符
+        result = all_valid_smiles[:target_count]
+        logger.info(f"Final result: {len(result)} SMILES from {target_count} actions")
+        
+        return result
 
     def _parse_response(self, response_content: str) -> List[str]:
         """解析 LLM 回應，提取 SMILES 列表"""

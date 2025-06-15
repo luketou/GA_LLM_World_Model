@@ -28,7 +28,7 @@ yaml.SafeLoader.add_constructor('!ENV', env_var_constructor)
 from oracle.guacamol_client import GuacaMolOracle
 from llm.generator import LLMGenerator
 from mcts.mcts_engine import MCTSEngine
-from kg.kg_store import KGStore, KGConfig
+from kg.kg_store import KGConfig, create_kg_store
 
 cfg = yaml.safe_load(pathlib.Path("config/settings.yml").read_text())
 
@@ -44,7 +44,7 @@ class AgentState:
     result: Dict[str, Any] = field(default_factory=dict)
 
 # ---------- init objects ----------
-kg = KGStore(KGConfig(**cfg["kg"]))
+kg = create_kg_store(KGConfig(**cfg["kg"]))
 oracle = GuacaMolOracle(cfg["TASK_NAME"])
 
 # 準備 LLM 配置，處理 API 金鑰
@@ -137,10 +137,16 @@ def decide(state: AgentState):
     if not nxt or nxt.depth >= cfg["max_depth"] \
        or oracle.calls_left <= 0:
         state.result = {"best": engine.best}
-        return END, state
+        return state
     state.parent_smiles = nxt.smiles
     state.depth = nxt.depth
-    return "Generate", state
+    return state
+
+def should_continue(state: AgentState):
+    """決定是否繼續工作流程"""
+    if state.result:  # 如果已經有結果，則結束
+        return END
+    return "Generate"
 
 # ---------- LangGraph ----------
 sg = StateGraph(AgentState)
@@ -157,7 +163,7 @@ sg.add_edge("LLM", "Oracle")
 sg.add_edge("Oracle", "Adv")
 sg.add_edge("Adv", "UpdateStores") # Edge to new node
 sg.add_edge("UpdateStores", "Decide") # Edge from new node
-sg.add_edge("Decide", "Generate")
+sg.add_conditional_edges("Decide", should_continue, {"Generate": "Generate", END: END})
 
 # 使用 MemorySaver 而不是 SqliteSaver，或者直接編譯
 try:

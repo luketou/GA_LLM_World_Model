@@ -59,16 +59,25 @@ async def run():
     iteration = 0
     
     try:
-        # 配置檢查點所需的參數
-        config = {"configurable": {"thread_id": "main_thread"}}
-        
-        async for state in graph_app.astream(init_state, config=config):
+        # 使用 LangGraph 新版本的調用方式
+        async for state_dict in graph_app.astream(init_state):
             iteration += 1
             logger.info(f"[Workflow] Iteration {iteration}")
             
+            # 獲取最新的 state
+            # state_dict 是一個字典，包含各個節點的輸出
+            current_state = None
+            for node_name, node_state in state_dict.items():
+                if isinstance(node_state, AgentState):
+                    current_state = node_state
+                    break
+            
+            if not current_state:
+                continue
+                
             # 檢查是否有結果
-            if hasattr(state, 'result') and state.result:
-                best_result = state.result.get("best")
+            if hasattr(current_state, 'result') and current_state.result:
+                best_result = current_state.result.get("best")
                 if best_result:
                     logger.info(f"[Result] Found best molecule: {best_result.smiles}")
                     logger.info(f"[Result] Score: {best_result.mean_score:.4f}")
