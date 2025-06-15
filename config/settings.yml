@@ -15,7 +15,7 @@ max_depth: 15
 # Oracle 設定
 oracle_limit: 500
 oracle_rate: 600_per_hour                  # 令牌桶
-smi_file: /home/luketou/LLM_AI_agent/Agent_predictor/data/guacamol_v1_all.txt
+smi_file: data/guacamol_v1_all.txt
 
 # LLM 設定
 llm:

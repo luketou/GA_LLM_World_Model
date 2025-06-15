@@ -8,14 +8,29 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any
 
 from configparser import ConfigParser
-import yaml, pathlib
+import yaml, pathlib, os, re
+
+# 自定義 YAML 載入器來處理環境變數
+def env_var_constructor(loader, node):
+    """處理 !ENV 標籤，讀取環境變數"""
+    value = loader.construct_scalar(node)
+    # 支援 ${VAR_NAME} 格式
+    pattern = re.compile(r'\$\{([^}]+)\}')
+    match = pattern.search(value)
+    if match:
+        env_var = match.group(1)
+        return os.environ.get(env_var, "")
+    return value
+
+# 註冊自定義構造器
+yaml.SafeLoader.add_constructor('!ENV', env_var_constructor)
 
 from oracle.guacamol_client import GuacaMolOracle
 from llm.generator import LLMGenerator
 from mcts.mcts_engine import MCTSEngine
 from kg.kg_store import KGStore, KGConfig
 
-cfg = yaml.safe_load(pathlib.Path("config/settings.yaml").read_text())
+cfg = yaml.safe_load(pathlib.Path("config/settings.yml").read_text())
 
 # ---------- shared state ----------
 @dataclass
@@ -131,7 +146,7 @@ def decide(state: AgentState):
 sg = StateGraph(AgentState)
 sg.add_node("Generate", generate_actions)
 sg.add_node("LLM", llm_generate)
-sg.add_async_node("Oracle", oracle_score)
+sg.add_node("Oracle", oracle_score)  # 修正：使用 add_node 而不是 add_async_node
 sg.add_node("Adv", compute_adv)
 sg.add_node("UpdateStores", update_stores) # Added new node
 sg.add_node("Decide", decide)
@@ -144,5 +159,11 @@ sg.add_edge("Adv", "UpdateStores") # Edge to new node
 sg.add_edge("UpdateStores", "Decide") # Edge from new node
 sg.add_edge("Decide", "Generate")
 
-sg.set_checkpoint(SqliteSaver(".lg_ckpt.db"))
-graph_app = sg.compile()
+# 使用 MemorySaver 而不是 SqliteSaver，或者直接編譯
+try:
+    from langgraph.checkpoint.memory import MemorySaver
+    checkpointer = MemorySaver()
+    graph_app = sg.compile(checkpointer=checkpointer)
+except ImportError:
+    # 如果沒有 checkpoint，直接編譯
+    graph_app = sg.compile()

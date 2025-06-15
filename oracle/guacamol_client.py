@@ -20,7 +20,6 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple, Optional
 
-# ---- GuacaMol imports (固定) ----
 from guacamol.standard_benchmarks import (
     hard_osimertinib, hard_fexofenadine, ranolazine_mpo,
     amlodipine_rings, sitagliptin_replacement, zaleplon_with_other_formula,
