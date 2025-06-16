@@ -18,4 +18,5 @@ dependencies:
   - guacamol
   - pip:
     - cerebras-cloud-sdk
+    - langgraph-checkpoint-sqlite
 
