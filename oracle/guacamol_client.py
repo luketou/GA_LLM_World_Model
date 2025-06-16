@@ -190,10 +190,14 @@ class GuacaMolOracle:
         非同步評分：
         - 檢查配額、令牌桶
         - 呼叫 benchmark 評分方法
-        - 寫入 score_log.csv（欄位：epoch, smiles, score）
+        - 每個分子評分後立即寫入 score_log.csv（欄位：epoch, smiles, score）
         """
         if self.calls_left <= 0:
             raise RuntimeError("Oracle call limit exhausted (500).")
+        
+        # 檢查是否有足夠的配額評分所有分子
+        if len(smiles) > self.calls_left:
+            raise RuntimeError(f"Not enough oracle calls remaining. Need {len(smiles)}, have {self.calls_left}")
         
         if not self.rate_limiter.acquire():
             # 若令牌不足，非同步 sleep
@@ -201,52 +205,55 @@ class GuacaMolOracle:
             if not self.rate_limiter.acquire():
                 raise RuntimeError("Rate limit exceeded")
 
-        self.calls_left -= 1
+        # 更新調用次數和 epoch（每批次調用算一次）
+        self.calls_left -= len(smiles)  # 每個分子都要消耗配額
         self.epoch += 1
         current_epoch = epoch if epoch is not None else self.epoch
         
         loop = asyncio.get_event_loop()
         
-        # 定義評分函數
-        def score_molecules():
+        # 定義評分函數，每個分子評分後立即記錄
+        def score_and_log_molecule(smile_str):
             try:
-                # 嘗試使用 objective 屬性進行逐一評分
+                # 嘗試使用 objective 屬性進行單一評分
                 if hasattr(self.benchmark, 'objective') and hasattr(self.benchmark.objective, 'score'):
-                    scores = []
-                    for s in smiles:
-                        try:
-                            score = self.benchmark.objective.score(s)
-                            scores.append(score)
-                        except Exception as e:
-                            print(f"[Oracle] Error scoring {s}: {e}")
-                            scores.append(0.0)
-                    return scores
-                elif hasattr(self.benchmark, 'score_list'):
-                    return self.benchmark.score_list(smiles)
+                    try:
+                        score = self.benchmark.objective.score(smile_str)
+                    except Exception as e:
+                        print(f"[Oracle] Error scoring {smile_str}: {e}")
+                        score = 0.0
                 elif hasattr(self.benchmark, 'score'):
-                    # 使用單一評分方法逐一評分
-                    return [self.benchmark.score(s) for s in smiles]
+                    # 使用單一評分方法
+                    score = self.benchmark.score(smile_str)
                 else:
                     # 最後回退：返回默認分數
-                    print(f"[Oracle] No suitable scoring method found, using default scores")
-                    return [0.0] * len(smiles)
+                    print(f"[Oracle] No suitable scoring method found, using default score")
+                    score = 0.0
+                
+                # 立即記錄到 CSV
+                with self.CSV_PATH.open("a", newline="") as f:
+                    csv.writer(f).writerow([current_epoch, smile_str, score])
+                
+                return score
             except Exception as e:
-                print(f"[Oracle] Scoring error: {e}")
+                print(f"[Oracle] Scoring error for {smile_str}: {e}")
                 print(f"[Oracle] Benchmark type: {type(self.benchmark)}")
                 print(f"[Oracle] Available methods: {[attr for attr in dir(self.benchmark) if not attr.startswith('_')]}")
-                # 返回默認分數
-                return [0.0] * len(smiles)
+                # 返回默認分數並記錄
+                score = 0.0
+                with self.CSV_PATH.open("a", newline="") as f:
+                    csv.writer(f).writerow([current_epoch, smile_str, score])
+                return score
         
-        scores = await loop.run_in_executor(
-            self.executor,
-            score_molecules
-        )
-
-        # CSV logging
-        with self.CSV_PATH.open("a", newline="") as f:
-            wr = csv.writer(f)
-            for sm, sc in zip(smiles, scores):
-                wr.writerow([current_epoch, sm, sc])
+        # 對每個 SMILES 逐一評分和記錄
+        scores = []
+        for smile_str in smiles:
+            score = await loop.run_in_executor(
+                self.executor,
+                score_and_log_molecule,
+                smile_str
+            )
+            scores.append(score)
 
         return scores
 

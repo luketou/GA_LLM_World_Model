@@ -61,10 +61,10 @@ class LLMGenerator:
                 **kwargs
             )
         else:
-            # 回退到 OpenAI (保持向後兼容)
+            # 回退到 OpenAI (保持向後兼容)，並確保 LangSmith 追蹤
             from langchain_openai import ChatOpenAI
             llm_kwargs = {
-                "model_name": model_name,
+                "model": model_name,  # 使用 model 而不是 model_name
                 "temperature": temperature,
                 **kwargs
             }
@@ -74,7 +74,10 @@ class LLMGenerator:
         
         logger.info(f"LLM Generator initialized with {provider} provider, model: {model_name}")
 
-    @traceable(name="LLM::generate_batch")
+    @traceable(
+        name="LLM::generate_batch",
+        metadata={"provider": "cerebras", "purpose": "molecular_generation"}
+    )
     def generate_batch(self,
                        parent_smiles: str,
                        actions: List[Dict[str, Any]],
@@ -90,6 +93,14 @@ class LLMGenerator:
         target_count = len(actions)
         all_valid_smiles = []
         retry_count = 0
+        
+        # 為 LangSmith 添加輸入上下文
+        langsmith_inputs = {
+            "parent_smiles": parent_smiles,
+            "num_actions": target_count,
+            "actions": actions,
+            "max_retries": max_retries
+        }
         
         while len(all_valid_smiles) < target_count and retry_count < max_retries:
             try:
@@ -144,6 +155,14 @@ class LLMGenerator:
         # 確保返回的 SMILES 數量與 actions 數量相符
         result = all_valid_smiles[:target_count]
         logger.info(f"Final result: {len(result)} SMILES from {target_count} actions")
+        
+        # 為 LangSmith 添加輸出上下文
+        langsmith_outputs = {
+            "generated_smiles": result,
+            "num_generated": len(result),
+            "num_retries_used": retry_count,
+            "success_rate": len(result) / target_count if target_count > 0 else 0
+        }
         
         return result
 

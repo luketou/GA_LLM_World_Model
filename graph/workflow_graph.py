@@ -1,5 +1,18 @@
 """
-LangGraph workflow orchestrator with LangSmith tracing.
+LangGraph workflow orchestrat# 設定 LangSmith 環境變數（如果尚未設定）
+if cfg.get("langsmith", {}).get("enabled", False) and not os.environ.get("LANGSMITH_API_KEY"):
+    langsmith_config = cfg["langsmith"]
+    os.environ["LANGSMITH_TRACING"] = str(langsmith_config.get("tracing", True)).lower()
+    os.environ["LANGSMITH_ENDPOINT"] = langsmith_config.get("endpoint", "https://api.smith.langchain.com")
+    os.environ["LANGSMITH_API_KEY"] = langsmith_config.get("api_key", "")
+    os.environ["LANGSMITH_PROJECT"] = langsmith_config.get("project", "world model agent")
+    logger.info(f"LangSmith tracing enabled in workflow_graph for project: {langsmith_config.get('project', 'world model agent')}")
+
+# 設定 Cerebras API 金鑰（如果尚未設定）
+llm_config = cfg.get("llm", {})
+if llm_config.get("api_key") and not os.environ.get("CEREBRAS_API_KEY"):
+    os.environ["CEREBRAS_API_KEY"] = llm_config.get("api_key")
+    logger.info("Cerebras API key loaded from settings.yml in workflow_graph")ith tracing.
 """
 from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -28,12 +41,28 @@ def env_var_constructor(loader, node):
 # 註冊自定義構造器
 yaml.SafeLoader.add_constructor('!ENV', env_var_constructor)
 
+# 載入配置
+cfg = yaml.safe_load(pathlib.Path("config/settings.yml").read_text())
+
+# 設定 LangSmith 環境變數（如果尚未設定）
+if cfg.get("langsmith", {}).get("enabled", False) and not os.environ.get("LANGSMITH_API_KEY"):
+    langsmith_config = cfg["langsmith"]
+    os.environ["LANGSMITH_TRACING"] = str(langsmith_config.get("tracing", True)).lower()
+    os.environ["LANGSMITH_ENDPOINT"] = langsmith_config.get("endpoint", "https://api.smith.langchain.com")
+    os.environ["LANGSMITH_API_KEY"] = langsmith_config.get("api_key", "")
+    os.environ["LANGSMITH_PROJECT"] = langsmith_config.get("project", "world model agent")
+    logger.info(f"LangSmith tracing enabled for project: {langsmith_config.get('project', 'world model agent')}")
+
+# 設定 Cerebras API 金鑰（如果尚未設定）
+llm_config = cfg.get("llm", {})
+if llm_config.get("api_key") and not os.environ.get("CEREBRAS_API_KEY"):
+    os.environ["CEREBRAS_API_KEY"] = llm_config.get("api_key")
+    logger.info("Cerebras API key loaded from settings.yml")
+
 from oracle.guacamol_client import GuacaMolOracle
 from llm.generator import LLMGenerator
 from mcts.mcts_engine import MCTSEngine
 from kg.kg_store import KGConfig, create_kg_store
-
-cfg = yaml.safe_load(pathlib.Path("config/settings.yml").read_text())
 
 # ---------- shared state ----------
 @dataclass
@@ -50,12 +79,8 @@ class AgentState:
 kg = create_kg_store(KGConfig(**cfg["kg"]))
 oracle = GuacaMolOracle(cfg["TASK_NAME"])
 
-# 準備 LLM 配置，處理 API 金鑰
+# 初始化 LLM Generator，API 金鑰已在上面設定到環境變數
 llm_config = cfg.get("llm", {}).copy()
-if "api_key" in llm_config and llm_config["api_key"] == "!ENV ${CEREBRAS_API_KEY}":
-    import os
-    llm_config["api_key"] = os.environ.get("CEREBRAS_API_KEY")
-
 llm_gen = LLMGenerator(**llm_config)
 engine = MCTSEngine(kg, cfg["max_depth"])
 
@@ -245,14 +270,25 @@ graph_app = sg.compile()
 # 設置執行配置
 async def run_workflow(initial_state):
     """運行工作流程，帶有遞歸限制和調試信息（異步版本）"""
-    config = {"recursion_limit": 50}  # 增加遞歸限制
+    # 從配置文件讀取遞迴限制
+    recursion_limit = cfg.get("workflow", {}).get("recursion_limit", 200)
+    max_iterations = cfg.get("workflow", {}).get("max_iterations", 1000)
+    
+    config = {"recursion_limit": recursion_limit}  # 從配置讀取遞歸限制
     iteration = 0
     last_chunk = None
     final_result = None
     
+    logger.info(f"Starting workflow with recursion_limit={recursion_limit}, max_iterations={max_iterations}")
+    
     try:
         async for chunk in graph_app.astream(initial_state, config=config):
             iteration += 1
+            
+            # 檢查是否超過最大迭代次數
+            if iteration > max_iterations:
+                logger.warning(f"Reached maximum iterations ({max_iterations}), stopping workflow")
+                break
             print(f"[Debug] Iteration {iteration}: {chunk}")
             last_chunk = chunk
             
@@ -268,9 +304,9 @@ async def run_workflow(initial_state):
                 print(f"[Debug] Reached END state")
                 return chunk
             
-            # 防止無限循環的安全檢查
-            if iteration > 50:  # 增加最大迭代次數
-                print("[Warning] Too many iterations, stopping")
+            # 防止無限循環的安全檢查（使用配置的最大迭代次數）
+            if iteration > max_iterations:
+                print(f"[Warning] Too many iterations ({iteration}), stopping")
                 # 嘗試從最後的狀態獲取最佳結果
                 if last_chunk:
                     for node_name, state in last_chunk.items():
@@ -278,7 +314,7 @@ async def run_workflow(initial_state):
                             best_node = engine.best if hasattr(engine, 'best') else None
                             forced_result = {
                                 "best": best_node,
-                                "reason": "Forced termination due to iteration limit"
+                                "reason": f"Forced termination due to iteration limit ({max_iterations})"
                             }
                             # 添加結果到狀態
                             state.result = forced_result

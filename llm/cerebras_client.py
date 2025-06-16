@@ -1,12 +1,13 @@
 """
 Cerebras LLM Client
-支援 Cerebras Cloud SDK 的 LLM 客戶端
+支援 Cerebras Cloud SDK 的 LLM 客戶端，並整合 LangSmith 追蹤
 """
 import os
 import json
 import logging
 from typing import List, Dict, Any, Optional
 from cerebras.cloud.sdk import Cerebras
+from langsmith import traceable
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,7 @@ class CerebrasClient:
         
         logger.info(f"Cerebras client initialized with model: {model_name}")
 
+    @traceable(name="Cerebras::generate")
     def generate(self, messages: List[Dict[str, str]]) -> str:
         """
         生成文本
@@ -71,6 +73,7 @@ class CerebrasClient:
             logger.error(f"Error generating text with Cerebras: {e}")
             raise
 
+    @traceable(name="Cerebras::generate_stream")
     def _generate_stream(self, messages: List[Dict[str, str]]) -> str:
         """串流生成"""
         try:
@@ -94,6 +97,7 @@ class CerebrasClient:
             logger.error(f"Error in stream generation: {e}")
             raise
 
+    @traceable(name="Cerebras::generate_sync")
     def _generate_sync(self, messages: List[Dict[str, str]]) -> str:
         """同步生成"""
         try:

@@ -12,6 +12,50 @@ import asyncio
 import yaml
 import pathlib
 import logging
+import os
+from langsmith import traceable
+
+# 早期初始化 LangSmith（在導入其他模組之前）
+def init_langsmith():
+    """初始化 LangSmith 追蹤，直接從 settings.yml 讀取配置"""
+    import re
+    
+    # 自定義 YAML 載入器來處理環境變數
+    def env_var_constructor(loader, node):
+        """處理 !ENV 標籤，讀取環境變數"""
+        value = loader.construct_scalar(node)
+        # 支援 ${VAR_NAME} 格式
+        pattern = re.compile(r'\$\{([^}]+)\}')
+        match = pattern.search(value)
+        if match:
+            env_var = match.group(1)
+            return os.environ.get(env_var, "")
+        return value
+
+    # 註冊自定義構造器
+    yaml.SafeLoader.add_constructor('!ENV', env_var_constructor)
+    
+    config_path = pathlib.Path("config/settings.yml")
+    if config_path.exists():
+        cfg = yaml.safe_load(config_path.read_text())
+        langsmith_config = cfg.get("langsmith", {})
+        
+        if langsmith_config.get("enabled", False):
+            os.environ["LANGSMITH_TRACING"] = str(langsmith_config.get("tracing", True)).lower()
+            os.environ["LANGSMITH_ENDPOINT"] = langsmith_config.get("endpoint", "https://api.smith.langchain.com")
+            os.environ["LANGSMITH_API_KEY"] = langsmith_config.get("api_key", "")
+            os.environ["LANGSMITH_PROJECT"] = langsmith_config.get("project", "world model agent")
+            print(f"LangSmith tracing initialized for project: {langsmith_config.get('project', 'world model agent')}")
+            
+        # 同時設定 Cerebras API 金鑰
+        llm_config = cfg.get("llm", {})
+        if llm_config.get("api_key"):
+            os.environ["CEREBRAS_API_KEY"] = llm_config.get("api_key")
+            print(f"Cerebras API key loaded from settings.yml")
+
+# 初始化 LangSmith
+init_langsmith()
+
 from graph.workflow_graph import graph_app, AgentState, oracle, cfg
 
 # 設置日誌
@@ -38,6 +82,10 @@ def prescan():
         return default_seed
 
 
+@traceable(
+    name="WorldModelAgent::run",
+    metadata={"task": "molecular_optimization", "agent_type": "ga_llm_world_model"}
+)
 async def run():
     """
     主要執行流程
@@ -54,21 +102,37 @@ async def run():
     init_state = AgentState(parent_smiles=seed, depth=0)
     logger.info(f"[Workflow] Starting with seed: {seed}")
     
+    # 為 LangSmith 記錄輸入信息
+    langsmith_inputs = {
+        "task_name": cfg['TASK_NAME'],
+        "seed_smiles": seed,
+        "max_depth": cfg['max_depth'],
+        "oracle_limit": cfg['oracle_limit']
+    }
+    
     # 3. 進入 LangGraph 工作流程
-    best_result = None
+    best_result_node = None
     
     try:
         # 使用新的異步運行函數
         from graph.workflow_graph import run_workflow
-        result = await run_workflow(init_state)
+        workflow_output = await run_workflow(init_state)
         
-        if result and isinstance(result, dict):
+        if workflow_output and isinstance(workflow_output, dict):
             # 從結果中提取最終狀態和結果
             final_state = None
             final_result = None
             
-            for node_name, node_state in result.items():
-                if hasattr(node_state, 'result') and node_state.result:
+            for node_name, node_state in workflow_output.items():
+                # 檢查當前節點狀態是否為字典，並且是否包含 'result' 鍵
+                if isinstance(node_state, dict) and 'result' in node_state:
+                    potential_result = node_state['result']
+                    # 檢查 'result' 鍵的值是否為字典，並且是否包含 'best' 鍵
+                    if isinstance(potential_result, dict) and 'best' in potential_result:
+                        final_result = potential_result
+                        final_state = node_state
+                        break
+                elif hasattr(node_state, 'result') and node_state.result:
                     final_result = node_state.result
                     final_state = node_state
                     break
@@ -76,15 +140,15 @@ async def run():
                     final_state = node_state
             
             if final_result:
-                best_result = final_result.get("best")
+                best_result_node = final_result.get("best")
                 reason = final_result.get("reason", "Unknown")
                 logger.info(f"[Workflow] Completed: {reason}")
                 
-                if best_result and hasattr(best_result, 'smiles'):
-                    logger.info(f"[Workflow] Best SMILES: {best_result.smiles}")
-                    logger.info(f"[Workflow] Best score: {getattr(best_result, 'total_score', 'N/A')}")
-                    logger.info(f"[Workflow] Depth: {getattr(best_result, 'depth', 'N/A')}")
-                    logger.info(f"[Workflow] Visits: {getattr(best_result, 'visits', 'N/A')}")
+                if best_result_node and hasattr(best_result_node, 'smiles'):
+                    logger.info(f"[Workflow] Best SMILES: {best_result_node.smiles}")
+                    logger.info(f"[Workflow] Best score: {getattr(best_result_node, 'total_score', 'N/A')}")
+                    logger.info(f"[Workflow] Depth: {getattr(best_result_node, 'depth', 'N/A')}")
+                    logger.info(f"[Workflow] Visits: {getattr(best_result_node, 'visits', 'N/A')}")
                 else:
                     logger.warning("[Workflow] Best result found but no valid molecule")
             else:
@@ -92,8 +156,12 @@ async def run():
                 
             # 輸出一些統計信息
             if final_state:
-                logger.info(f"[Workflow] Final depth reached: {getattr(final_state, 'depth', 'Unknown')}")
-                logger.info(f"[Workflow] Final parent: {getattr(final_state, 'parent_smiles', 'Unknown')}")
+                if isinstance(final_state, dict):
+                    logger.info(f"[Workflow] Final depth reached: {final_state.get('depth', 'Unknown')}")
+                    logger.info(f"[Workflow] Final parent: {final_state.get('parent_smiles', 'Unknown')}")
+                else:
+                    logger.info(f"[Workflow] Final depth reached: {getattr(final_state, 'depth', 'Unknown')}")
+                    logger.info(f"[Workflow] Final parent: {getattr(final_state, 'parent_smiles', 'Unknown')}")
         else:
             logger.warning("[Workflow] No result returned")
         
@@ -105,13 +173,36 @@ async def run():
         logger.error(traceback.format_exc())
         
     # 4. 輸出最終結果
-    if best_result:
+    if best_result_node and hasattr(best_result_node, 'smiles'):
+        score_to_print = getattr(best_result_node, 'total_score', 0.0)
+        if not isinstance(score_to_print, (int, float)):
+            score_to_print = 0.0
+            
+        # 為 LangSmith 記錄輸出信息
+        langsmith_outputs = {
+            "success": True,
+            "best_smiles": best_result_node.smiles,
+            "best_score": score_to_print,
+            "final_depth": getattr(best_result_node, 'depth', 'N/A'),
+            "visits": getattr(best_result_node, 'visits', 'N/A'),
+            "oracle_calls_remaining": oracle.calls_left
+        }
+        
         print(f"\n=== FINAL RESULT ===")
-        print(f"BEST SMILES: {best_result.smiles}")
-        print(f"BEST SCORE:  {best_result.mean_score:.4f}")
-        print(f"VISITS:      {best_result.visits}")
+        print(f"BEST SMILES: {best_result_node.smiles}")
+        print(f"BEST SCORE:  {score_to_print:.4f}")
+        print(f"VISITS:      {getattr(best_result_node, 'visits', 'N/A')}")
         print(f"ORACLE CALLS REMAINING: {oracle.calls_left}")
     else:
+        # 為 LangSmith 記錄失敗信息
+        langsmith_outputs = {
+            "success": False,
+            "best_smiles": None,
+            "best_score": 0.0,
+            "oracle_calls_remaining": oracle.calls_left,
+            "reason": "No valid result found"
+        }
+        
         print(f"\n=== NO RESULT FOUND ===")
         print(f"ORACLE CALLS REMAINING: {oracle.calls_left}")
     

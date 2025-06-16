@@ -10,12 +10,17 @@ gamma_adv: 0.3
 alpha_pw: 2
 beta_pw: 0.6
 grpo_eps: 0.2
-max_depth: 5  # 減少最大深度以避免過於複雜的分子
+max_depth: 10  # 減少最大深度以避免過於複雜的分子
 
 # Oracle 設定
 oracle_limit: 500
 oracle_rate: 600_per_hour                  # 令牌桶
 smi_file: data/guacamol_v1_all.txt
+
+# 工作流程設定
+workflow:
+  recursion_limit: 200                     # LangGraph 遞迴限制，預設為 50
+  max_iterations: 1000                     # 最大迭代次數
 
 # LLM 設定
 llm:
@@ -29,7 +34,10 @@ llm:
 
 # LangSmith 設定
 langsmith:
-  project: mol-agent-v1
+  enabled: true
+  tracing: true
+  endpoint: "https://api.smith.langchain.com"
+  project: "world model agent"
   api_key: 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
 
 # Knowledge Graph 設定 (可選，如果無法連接會使用內存存儲)
