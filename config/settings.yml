@@ -10,7 +10,7 @@ gamma_adv: 0.3
 alpha_pw: 2
 beta_pw: 0.6
 grpo_eps: 0.2
-max_depth: 10  # 減少最大深度以避免過於複雜的分子
+max_depth: 50  # search tree 最大深度
 
 # Oracle 設定
 oracle_limit: 500
@@ -21,6 +21,9 @@ smi_file: data/guacamol_v1_all.txt
 workflow:
   recursion_limit: 200                     # LangGraph 遞迴限制，預設為 50
   max_iterations: 1000                     # 最大迭代次數
+  early_stop_threshold: 0.9                # 早停閾值：找到此分數以上的分子就停止
+  max_smiles_length: 100                   # SMILES 最大長度限制，超過此長度的分子將被過濾或終止
+                                           # 建議值：50-150，太小會限制分子多樣性，太大會導致過於複雜的分子
 
 # LLM 設定
 llm:

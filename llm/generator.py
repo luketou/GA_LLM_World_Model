@@ -31,6 +31,7 @@ class LLMGenerator:
                  top_p: float = 1.0,
                  stream: bool = True,
                  api_key: Optional[str] = None,
+                 max_smiles_length: int = 100,  # 新增 SMILES 長度限制參數
                  **kwargs):
         """
         初始化 LLM 客戶端
@@ -49,6 +50,7 @@ class LLMGenerator:
         self.model_name = model_name
         self.temperature = temperature
         self.max_completion_tokens = max_completion_tokens
+        self.max_smiles_length = max_smiles_length  # 存儲 SMILES 長度限制
         
         if provider.lower() == "cerebras":
             self.client = CerebrasClient(
@@ -218,10 +220,10 @@ class LLMGenerator:
                     continue
                 
                 # 基本格式檢查：
-                # 1. 長度合理 (至少1個字符，不超過150個字符以避免過度複雜)
+                # 1. 長度合理 (至少1個字符，不超過配置的最大長度以避免過度複雜)
                 # 2. 包含合理的化學元素字符
                 # 3. 不包含明顯的非SMILES字符
-                if (1 <= len(smiles) <= 150 and
+                if (1 <= len(smiles) <= self.max_smiles_length and
                     self._basic_smiles_format_check(smiles)):
                     checked_smiles.append(smiles)
                 else:
@@ -267,7 +269,7 @@ class LLMGenerator:
         import random
         
         # 如果基礎分子已經很長，使用更保守的變異
-        if len(base_smiles) > 100:
+        if len(base_smiles) > self.max_smiles_length * 0.8:  # 80% 的最大長度
             # 對於長分子，只做簡單的原子替換
             variations = [
                 base_smiles,  # 保持原樣
@@ -287,7 +289,7 @@ class LLMGenerator:
             ]
         
         # 移除可能無效的變異
-        valid_variations = [v for v in variations if 1 <= len(v) <= 150]
+        valid_variations = [v for v in variations if 1 <= len(v) <= self.max_smiles_length]
         
         if valid_variations:
             return random.choice(valid_variations)
