@@ -73,6 +73,74 @@ COARSE = [
 ]
 
 
-def sample(parent_smiles: str, k: int) -> List[Dict[str, Any]]:
-    """從粗操作集中隨機選 k 種操作"""
-    return random.sample(COARSE, k=min(k, len(COARSE)))
+def sample(parent_smiles: str, k: int, scaffold_priority_factor: float = 1.5) -> List[Dict[str, Any]]:
+    """
+    從粗操作集中隨機選 k 種操作，可選擇性提高骨架抽換操作的優先級。
+
+    Args:
+        parent_smiles: 父分子 SMILES (目前在此抽樣邏輯中未使用，但保留以維持API一致性).
+        k: 要選擇的操作數量.
+        scaffold_priority_factor: 骨架抽換操作的優先級因子。
+                                     - 大於 1.0 會增加選擇骨架抽換的機率。
+                                       例如，2.0 表示骨架抽換的選擇機率約為其他類型操作的兩倍。
+                                     - 設為 1.0 則近似於均等機率抽樣 (類似原始的 random.sample)。
+                                     - 建議值介於 1.0 到 3.0 之間開始嘗試。
+    Returns:
+        選擇的粗操作列表.
+    """
+    if not COARSE or k <= 0:
+        return []
+
+    num_to_sample = min(k, len(COARSE))
+    if num_to_sample <= 0:
+        return []
+
+    # 確保優先級因子有效
+    if scaffold_priority_factor <= 0:
+        scaffold_priority_factor = 1.0
+
+    # 創建帶權重的操作列表副本，用於抽樣
+    # 這樣做是為了在抽樣過程中可以移除已選中的項目，模擬無放回抽樣
+    temp_weighted_actions = []
+    for i, action in enumerate(COARSE):
+        weight = scaffold_priority_factor if action.get("type") == "scaffold_swap" else 1.0
+        temp_weighted_actions.append({"action": action, "weight": weight, "id": i}) # id 用於唯一標識
+
+    selected_actions_final = []
+    
+    # 進行 k 次加權抽樣（模擬無放回）
+    for _ in range(num_to_sample):
+        if not temp_weighted_actions: # 如果所有操作都已被選中
+            break
+
+        # 準備當前輪次的抽樣列表和對應權重
+        actions_for_choice = [item["action"] for item in temp_weighted_actions]
+        weights_for_choice = [item["weight"] for item in temp_weighted_actions]
+
+        # 檢查權重是否有效 (例如，總和是否為0)
+        if not weights_for_choice or sum(weights_for_choice) == 0:
+            # 如果所有剩餘權重都為0，則退回到均勻隨機抽樣
+            if actions_for_choice:
+                chosen_action_object = random.choice(actions_for_choice)
+            else:
+                break # 沒有更多操作可選
+        else:
+            # random.choices 返回一個列表 (即使 k=1)，我們取第一個元素
+            chosen_action_object = random.choices(actions_for_choice, weights=weights_for_choice, k=1)[0]
+        
+        selected_actions_final.append(chosen_action_object)
+
+        # 從 temp_weighted_actions 中移除已選中的操作，以模擬無放回抽樣
+        index_to_remove = -1
+        for i, item in enumerate(temp_weighted_actions):
+            if item["action"] == chosen_action_object: 
+                index_to_remove = i
+                break
+        
+        if index_to_remove != -1:
+            temp_weighted_actions.pop(index_to_remove)
+        else:
+            if temp_weighted_actions: 
+                 temp_weighted_actions.pop(random.randrange(len(temp_weighted_actions)))
+
+    return selected_actions_final
