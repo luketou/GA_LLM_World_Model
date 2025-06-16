@@ -56,48 +56,53 @@ async def run():
     
     # 3. 進入 LangGraph 工作流程
     best_result = None
-    iteration = 0
     
     try:
-        # 使用 LangGraph 新版本的調用方式
-        async for state_dict in graph_app.astream(init_state):
-            iteration += 1
-            logger.info(f"[Workflow] Iteration {iteration}")
+        # 使用新的異步運行函數
+        from graph.workflow_graph import run_workflow
+        result = await run_workflow(init_state)
+        
+        if result and isinstance(result, dict):
+            # 從結果中提取最終狀態和結果
+            final_state = None
+            final_result = None
             
-            # 獲取最新的 state
-            # state_dict 是一個字典，包含各個節點的輸出
-            current_state = None
-            for node_name, node_state in state_dict.items():
-                if isinstance(node_state, AgentState):
-                    current_state = node_state
+            for node_name, node_state in result.items():
+                if hasattr(node_state, 'result') and node_state.result:
+                    final_result = node_state.result
+                    final_state = node_state
                     break
+                elif isinstance(node_state, AgentState):
+                    final_state = node_state
             
-            if not current_state:
-                continue
+            if final_result:
+                best_result = final_result.get("best")
+                reason = final_result.get("reason", "Unknown")
+                logger.info(f"[Workflow] Completed: {reason}")
                 
-            # 檢查是否有結果
-            if hasattr(current_state, 'result') and current_state.result:
-                best_result = current_state.result.get("best")
-                if best_result:
-                    logger.info(f"[Result] Found best molecule: {best_result.smiles}")
-                    logger.info(f"[Result] Score: {best_result.mean_score:.4f}")
-                    logger.info(f"[Result] Visits: {best_result.visits}")
-                    break
-            
-            # 檢查 Oracle 配額
-            if oracle.calls_left <= 0:
-                logger.warning("[Workflow] Oracle call limit exhausted")
-                break
+                if best_result and hasattr(best_result, 'smiles'):
+                    logger.info(f"[Workflow] Best SMILES: {best_result.smiles}")
+                    logger.info(f"[Workflow] Best score: {getattr(best_result, 'total_score', 'N/A')}")
+                    logger.info(f"[Workflow] Depth: {getattr(best_result, 'depth', 'N/A')}")
+                    logger.info(f"[Workflow] Visits: {getattr(best_result, 'visits', 'N/A')}")
+                else:
+                    logger.warning("[Workflow] Best result found but no valid molecule")
+            else:
+                logger.warning("[Workflow] No final result found")
                 
-            # 防止無限循環
-            if iteration > 1000:
-                logger.warning("[Workflow] Maximum iterations reached")
-                break
-                
+            # 輸出一些統計信息
+            if final_state:
+                logger.info(f"[Workflow] Final depth reached: {getattr(final_state, 'depth', 'Unknown')}")
+                logger.info(f"[Workflow] Final parent: {getattr(final_state, 'parent_smiles', 'Unknown')}")
+        else:
+            logger.warning("[Workflow] No result returned")
+        
     except KeyboardInterrupt:
         logger.info("[Workflow] Interrupted by user")
     except Exception as e:
         logger.error(f"[Workflow] Error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         
     # 4. 輸出最終結果
     if best_result:
@@ -105,11 +110,9 @@ async def run():
         print(f"BEST SMILES: {best_result.smiles}")
         print(f"BEST SCORE:  {best_result.mean_score:.4f}")
         print(f"VISITS:      {best_result.visits}")
-        print(f"ITERATIONS:  {iteration}")
         print(f"ORACLE CALLS REMAINING: {oracle.calls_left}")
     else:
         print(f"\n=== NO RESULT FOUND ===")
-        print(f"ITERATIONS:  {iteration}")
         print(f"ORACLE CALLS REMAINING: {oracle.calls_left}")
     
     # 5. 清理資源
