@@ -3,7 +3,7 @@ START_SMILES: C1CCCCC1                      # dummy seed，稍候由 prescan 覆
 TASK_NAME: celecoxib                       # 默認測試任務
 
 # MCTS / GRPO / UCT 參數
-K_init: 8
+K_init: 30 # number of smiles generated for each node
 p_top: 8
 c_uct: 1.4
 gamma_adv: 0.3
