@@ -1,2 +1,4 @@
-/__pycache__
+__pycache__/
 /log
+WM_agent.o*
+score_log.csv

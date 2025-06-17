@@ -19,7 +19,7 @@ smi_file: data/guacamol_v1_all.txt
 
 # 工作流程設定
 workflow:
-  recursion_limit: 200                     # LangGraph 遞迴限制，預設為 50
+  recursion_limit: 1000                     # LangGraph 遞迴限制，預設為 50
   max_iterations: 1000                     # 最大迭代次數
   early_stop_threshold: 0.9                # 早停閾值：找到此分數以上的分子就停止
   max_smiles_length: 100                   # SMILES 最大長度限制，超過此長度的分子將被過濾或終止
