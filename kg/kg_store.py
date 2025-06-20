@@ -47,6 +47,49 @@ class MockKGStore:
         if smiles in self.molecules:
             self.molecules[smiles]['cold'] = True
 
+    def get_branch_history(self, target_smiles: str) -> List[Dict]:
+        """
+        獲取從根節點到目標分子的完整路徑歷史
+        
+        Args:
+            target_smiles: 目標分子的 SMILES 字符串
+            
+        Returns:
+            歷史路徑列表，每個元素包含 {'smiles': str, 'action': str, 'score': float}
+        """
+        if target_smiles not in self.molecules:
+            logger.warning(f"Target SMILES {target_smiles} not found in KG")
+            return []
+        
+        # 回溯路徑
+        path = []
+        current_smiles = target_smiles
+        visited = set()  # 防止無限循環
+        
+        while current_smiles and current_smiles in self.molecules and current_smiles not in visited:
+            visited.add(current_smiles)
+            node_data = self.molecules[current_smiles]
+            
+            # 添加當前節點信息
+            path_entry = {
+                'smiles': current_smiles,
+                'action': node_data.get('action', 'ROOT'),
+                'score': node_data.get('score', 0.0)
+            }
+            path.append(path_entry)
+            
+            # 移動到父節點
+            parent_smiles = node_data.get('parent')
+            if parent_smiles == current_smiles or parent_smiles is None:
+                break
+            current_smiles = parent_smiles
+        
+        # 反轉路徑，使其從根節點到目標節點
+        path.reverse()
+        
+        logger.debug(f"Branch history for {target_smiles}: {len(path)} nodes")
+        return path
+
 
 class KGStore:
     def __init__(self, cfg: KGConfig):
@@ -109,6 +152,43 @@ class KGStore:
         """為低潛力節點加上 cold=true 標籤"""
         with self.driver.session(database=self.database) as s:
             s.run("MATCH (m:Molecule {smiles:$s}) SET m.cold=true", s=smiles)
+
+    def get_branch_history(self, target_smiles: str) -> List[Dict]:
+        """
+        獲取從根節點到目標分子的完整路徑歷史
+        
+        Args:
+            target_smiles: 目標分子的 SMILES 字符串
+            
+        Returns:
+            歷史路徑列表，每個元素包含 {'smiles': str, 'action': str, 'score': float}
+        """
+        query = """
+        MATCH path = (root:Molecule)-[:GENERATES*]->(target:Molecule {smiles: $target_smiles})
+        WHERE NOT EXISTS((root)<-[:GENERATES]-())
+        WITH nodes(path) as path_nodes, relationships(path) as path_rels
+        UNWIND range(0, size(path_nodes)-1) as i
+        RETURN 
+            path_nodes[i].smiles as smiles,
+            CASE WHEN i = 0 THEN 'ROOT' ELSE path_rels[i-1].action END as action,
+            path_nodes[i].score as score
+        ORDER BY i
+        """
+        
+        try:
+            with self.driver.session(database=self.database) as session:
+                result = session.run(query, target_smiles=target_smiles)
+                history = []
+                for record in result:
+                    history.append({
+                        'smiles': record['smiles'],
+                        'action': record['action'] or 'ROOT',
+                        'score': record['score'] or 0.0
+                    })
+                return history
+        except Exception as e:
+            print(f"Error getting branch history: {e}")
+            return []
 
 
 def create_kg_store(cfg: KGConfig):

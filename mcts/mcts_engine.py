@@ -6,52 +6,93 @@ MCTS Engine - 核心引擎
 """
 import random
 import math
+import logging
 from typing import List, Dict, Optional
 from .node import Node
 from .uct import uct
 from .progressive_widening import allow_expand
-from actions.coarse_actions import sample as coarse_sample
-from actions.fine_actions import expand as fine_expand
+from actions.coarse_actions import sample as coarse_sample, get_all_actions as get_coarse_actions
+from actions.fine_actions import expand as fine_expand, get_all_actions as get_fine_actions
 from kg.kg_store import KGStore
+from llm.generator import LLMGenerator
 
+logger = logging.getLogger(__name__)
 
 class MCTSEngine:
     """MCTS 核心引擎"""
     
-    def __init__(self, kg: KGStore, max_depth: int):
-        self.kg = kg
+    def __init__(self, kg_store: KGStore, max_depth: int, llm_gen: LLMGenerator):
+        self.kg = kg_store
         self.root = Node(smiles="ROOT", depth=0)
         self.best = self.root
         self.max_depth = max_depth
         self.epoch = 0
         self.nodes = {"ROOT": self.root}  # 快速查找節點
+        self.llm_gen = llm_gen
+        self.available_actions = get_coarse_actions() + get_fine_actions()
+
+    def add_node(self, smiles: str, parent: str = None, action: str = None):
+        if smiles not in self.nodes:
+            self.nodes[smiles] = {'parent': parent, 'action': action, 'visits': 0, 'value': 0.0, 'children': []}
 
     # ----- external API -----
     def propose_actions(self, parent_smiles: str, depth: int, k: int) -> List[Dict]:
         """
-        根據 depth 決定 coarse 或 fine 操作
-        
-        Args:
-            parent_smiles: 父分子 SMILES
-            depth: 當前深度
-            k: 要產生的動作數量
-            
-        Returns:
-            動作列表
+        使用 LLM 根據當前分支的歷史紀錄來選擇最佳動作。
         """
-        if depth < 5:   # coarse 層：使用粗粒度操作
-            return coarse_sample(parent_smiles, k)
-        else:   # fine 層：使用微調操作
-            # Progressive Widening 決定 unlock factor
-            parent = self._get_or_create_node(parent_smiles, depth)
-            unlock_factor = parent.visits ** 0.6 if parent.visits > 0 else 0.1
-            return fine_expand(parent_smiles, unlock_factor, top_k=k)
+        if parent_smiles == "ROOT":
+            # 對於根節點，由於沒有歷史紀錄，使用原始的隨機抽樣方法
+            logger.info("Root node: using random coarse action sampling.")
+            return coarse_sample(k=k)
 
-    def update_batch(self,
-                     parent_smiles: str,
-                     batch_smiles: List[str],
-                     scores: List[float],
-                     advantages: List[float]):
+        logger.info(f"Proposing actions for {parent_smiles} using LLM guidance.")
+        
+        # 1. 從 KG 獲取分支歷史
+        try:
+            history = self.kg.get_branch_history(parent_smiles)
+        except Exception as e:
+            logger.error(f"Error getting branch history: {e}")
+            history = []
+        
+        if not history or len(history) < 2:  # 需要至少有根節點和當前節點
+            logger.warning(f"Insufficient history for {parent_smiles}. Falling back to rule-based sampling.")
+            # 如果歷史不足，退回至原始的規則式邏輯
+            if depth < 5:
+                return coarse_sample(k=k)
+            else:
+                return fine_expand(parent_smiles, k=k)
+
+        # 2. 呼叫 LLM 選擇 actions
+        try:
+            selected_action_names = self.llm_gen.select_actions(
+                parent_smiles=parent_smiles,
+                history=history,
+                available_actions=self.available_actions,
+                k=k
+            )
+            
+            if not selected_action_names:
+                raise ValueError("LLM returned empty action list")
+            
+            # 3. 根據 LLM 回傳的名稱，篩選出對應的 action 物件
+            action_map = {action['name']: action for action in self.available_actions}
+            selected_actions = [action_map[name] for name in selected_action_names if name in action_map]
+            
+            if not selected_actions:
+                raise ValueError("No valid actions found from LLM selection")
+            
+            logger.info(f"LLM selected {len(selected_actions)} actions: {[a['name'] for a in selected_actions]}")
+            return selected_actions
+
+        except Exception as e:
+            logger.error(f"LLM action selection failed: {e}. Falling back to rule-based sampling.")
+            # 如果 LLM 選擇失敗，退回至原始的規則式邏輯
+            if depth < 5:
+                return coarse_sample(k=k)
+            else:
+                return fine_expand(parent_smiles, k=k)
+
+    def update_batch(self, parent_smiles: str, batch_smiles: List[str], scores: List[float], advantages: List[float]):
         """
         更新 MCTS 樹、Neo4j KG、最佳節點
         

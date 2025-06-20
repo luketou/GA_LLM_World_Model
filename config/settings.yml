@@ -30,7 +30,7 @@ llm:
   provider: cerebras  # 使用 cerebras 而不是 openai
   model_name: llama-3.3-70b
   temperature: 0.2
-  max_completion_tokens: 2048
+  max_completion_tokens: 8192
   top_p: 1
   stream: true
   api_key: csk-8f3ct6y23mw2fw3fdmyx8t4tx8rw8p85tdx9nrm8mv2t9m26

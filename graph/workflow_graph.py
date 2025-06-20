@@ -69,11 +69,23 @@ class AgentState:
 kg = create_kg_store(KGConfig(**cfg["kg"]))
 oracle = GuacaMolOracle(cfg["TASK_NAME"])
 
-# 初始化 LLM Generator，API 金鑰已在上面設定到環境變數
+# 初始化 LLM Generator，從配置檔案讀取所有參數
 llm_config = cfg.get("llm", {}).copy()
 llm_config["max_smiles_length"] = MAX_SMILES_LENGTH  # 添加 SMILES 長度限制
-llm_gen = LLMGenerator(**llm_config)
-engine = MCTSEngine(kg, cfg["max_depth"])
+
+# 確保所有必要的參數都被傳遞
+llm_gen = LLMGenerator(
+    provider=llm_config.get("provider", "cerebras"),
+    model_name=llm_config.get("model_name", "llama-3.3-70b"),
+    temperature=llm_config.get("temperature", 0.2),
+    max_completion_tokens=llm_config.get("max_completion_tokens", 2048),
+    max_smiles_length=llm_config.get("max_smiles_length", MAX_SMILES_LENGTH),
+    top_p=llm_config.get("top_p", 1),
+    stream=llm_config.get("stream", True),
+    api_key=llm_config.get("api_key")
+)
+
+engine = MCTSEngine(kg, cfg["max_depth"], llm_gen=llm_gen)
 
 # ---------- nodes ----------
 @traceable

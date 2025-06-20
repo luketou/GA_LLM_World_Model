@@ -9,6 +9,8 @@ LLM 客戶端封裝：
 - 回傳 SMILES (驗證交給 Oracle)
 """
 import json
+import yaml
+import pathlib
 import logging
 import os
 import re
@@ -25,54 +27,44 @@ class LLMGenerator:
     
     def __init__(self, 
                  provider: str = "cerebras",
-                 model_name: str = "llama-4-scout-17b-16e-instruct",
-                 temperature: float = 0.2,
-                 max_completion_tokens: int = 2048,
-                 top_p: float = 1.0,
-                 stream: bool = True,
+                 model_name: str = None,
+                 temperature: float = 0.7,
+                 max_completion_tokens: int = 8192,
+                 max_smiles_length: int = 100,
                  api_key: Optional[str] = None,
-                 max_smiles_length: int = 100,  # 新增 SMILES 長度限制參數
                  **kwargs):
         """
         初始化 LLM 客戶端
         
         Args:
             provider: LLM 提供者 ("cerebras" 或 "openai")
-            model_name: 模型名稱
+            model_name: 模型名稱，如果為 None 則從 settings.yml 讀取
             temperature: 溫度參數
             max_completion_tokens: 最大完成令牌數
-            top_p: Top-p 參數
-            stream: 是否使用串流
+            max_smiles_length: SMILES 最大長度限制
             api_key: API 金鑰
             **kwargs: 其他參數
         """
-        self.provider = provider
-        self.model_name = model_name
-        self.temperature = temperature
-        self.max_completion_tokens = max_completion_tokens
-        self.max_smiles_length = max_smiles_length  # 存儲 SMILES 長度限制
+        # 如果沒有提供 model_name，從配置檔讀取
+        if model_name is None:
+            try:
+                cfg = yaml.safe_load(pathlib.Path("config/settings.yml").read_text())
+                model_name = cfg.get("llm", {}).get("model_name", "llama-3.3-70b")
+            except:
+                model_name = "llama-3.3-70b"  # 預設值
         
-        if provider.lower() == "cerebras":
-            self.client = CerebrasClient(
-                model_name=model_name,
-                temperature=temperature,
-                max_completion_tokens=max_completion_tokens,
-                top_p=top_p,
-                stream=stream,
-                api_key=api_key,
-                **kwargs
-            )
+        self.provider = provider
+        self.model = model_name  # 使用從配置檔讀取的模型名稱
+        self.temperature = temperature
+        self.max_tokens = max_completion_tokens
+        self.max_smiles_length = max_smiles_length
+        
+        # 初始化 Cerebras 客戶端
+        if provider == "cerebras":
+            from cerebras.cloud.sdk import Cerebras
+            self.client = Cerebras(api_key=api_key)
         else:
-            # 回退到 OpenAI (保持向後兼容)，並確保 LangSmith 追蹤
-            from langchain_openai import ChatOpenAI
-            llm_kwargs = {
-                "model": model_name,  # 使用 model 而不是 model_name
-                "temperature": temperature,
-                **kwargs
-            }
-            if max_completion_tokens:
-                llm_kwargs["max_tokens"] = max_completion_tokens
-            self.client = ChatOpenAI(**llm_kwargs)
+            raise ValueError(f"Unsupported provider: {provider}")
         
         logger.info(f"LLM Generator initialized with {provider} provider, model: {model_name}")
 
@@ -167,6 +159,76 @@ class LLMGenerator:
         }
         
         return result
+
+    def select_actions(self, parent_smiles: str, history: List[Dict], available_actions: List[Dict], k: int) -> List[str]:
+        """
+        請求 LLM 根據歷史數據選擇最佳的 k 個動作。
+
+        Args:
+            parent_smiles: 當前的 SMILES 字串。
+            history: 一個包含分支中每一步驟的字典列表。
+                     例如: [{'smiles': '...', 'action': '...', 'score': ...}, ...]
+            available_actions: 所有可用的 action 字典列表。
+            k: 要選擇的動作數量。
+
+        Returns:
+            一個包含所選動作名稱的列表。
+        """
+        # 1. 格式化歷史紀錄以用於提示
+        history_str = "Path to current molecule:\n"
+        for i, step in enumerate(history):
+            history_str += f"{i+1}. Molecule: {step.get('smiles', 'N/A')}\n"
+            history_str += f"   Action Taken: {step.get('action', 'N/A')}\n"
+            history_str += f"   Resulting Score: {step.get('score', 'N/A'):.4f}\n"
+        
+        # 2. 格式化可用動作列表以用於提示
+        action_list_str = "\n".join([f"- {action['name']}: {action['description']}" for action in available_actions])
+
+        # 3. 建構提示
+        prompt = f"""You are an expert medicinal chemist guiding a molecular optimization process.
+Your goal is to find a molecule with the highest possible score. Higher scores are better.
+
+We are exploring a path in the chemical space. Here is the history of the current exploration branch:
+{history_str}
+
+Our current molecule is: {parent_smiles}
+Its score is: {history[-1].get('score', 'N/A'):.4f}
+
+Based on the trend in the history, select the top {k} most promising actions from the list below to apply to the current molecule.
+Your objective is to choose actions that are most likely to increase the score significantly.
+
+Available Actions:
+{action_list_str}
+
+Respond with ONLY a JSON list containing the string names of the {k} actions you have chosen. Do not add any other text or explanation.
+Example format: ["action_name_1", "action_name_2"]
+"""
+
+        # 4. 呼叫 LLM
+        response = self.client.chat.completions.create(
+            model=self.model,  # 使用從配置檔讀取的模型名稱
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2, # 使用較低的溫度以獲得更具確定性的選擇
+            max_tokens=250,
+        )
+        
+        content = response.choices[0].message.content
+        
+        # 5. 解析 LLM 回應
+        try:
+            if "```json" in content:
+                content = content.split("```json")[1].split("```")[0].strip()
+            elif "```" in content:
+                 content = content.split("```")[1].split("```")[0].strip()
+
+            selected_names = json.loads(content)
+            if isinstance(selected_names, list) and all(isinstance(i, str) for i in selected_names):
+                return selected_names[:k]
+            else:
+                raise ValueError("LLM response is not a list of strings.")
+        except (json.JSONDecodeError, ValueError, IndexError) as e:
+            logging.error(f"Error parsing LLM response for action selection: {e}\nRaw content: '{content}'")
+            return []
 
     def _parse_response(self, response_content: str) -> List[str]:
         """解析 LLM 回應，提取 SMILES 列表"""

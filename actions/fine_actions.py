@@ -86,6 +86,48 @@ def analyze_smiles_heuristics(smiles: str) -> Dict[str, Any]:
     }
 
 
+def expand_smiles_aware(parent_smiles: str, k: int = 5) -> List[Dict]:
+    """
+    根據父分子特性選擇合適的 fine actions
+    
+    Args:
+        parent_smiles: 父分子的 SMILES 字符串
+        k: 要選擇的動作數量
+    
+    Returns:
+        選擇的動作列表
+    """
+    all_actions = get_all_actions()
+    
+    if k >= len(all_actions):
+        return all_actions
+    
+    # 簡單的啟發式規則：根據分子長度和複雜度選擇動作
+    mol_length = len(parent_smiles)
+    
+    # 為不同類型的動作分配權重
+    weights = []
+    for action in all_actions:
+        action_type = action.get('type', 'unknown')
+        
+        if mol_length < 20:  # 小分子，偏好添加基團
+            if action_type in ['alkyl_group', 'functional_group']:
+                weights.append(2.0)
+            else:
+                weights.append(1.0)
+        else:  # 大分子，偏好移除或替換
+            if action_type in ['removal', 'replacement']:
+                weights.append(2.0)
+            else:
+                weights.append(1.0)
+    
+    # 加權隨機選擇
+    import random
+    selected_actions = random.choices(all_actions, weights=weights, k=k)
+    
+    return selected_actions
+
+
 def expand_smiles_aware(parent_smiles: str, unlock_factor: float, top_k: int = 30) -> List[Dict[str, Any]]:
     """
     基於 SMILES 啟發式分析的微調操作擴展，不依賴 RDKit
@@ -295,3 +337,60 @@ def expand_balanced(parent_smiles: str, unlock_factor: float, top_k: int = 30,
                 results.extend(random_actions)
     
     return results
+
+
+def get_all_actions():
+    """
+    返回所有可用的 fine actions 列表
+    """
+    actions = []
+    
+    # 小分子基團
+    small_groups = [
+        {"name": "add_methyl", "description": "添加甲基 (-CH3)", "type": "alkyl_group"},
+        {"name": "add_ethyl", "description": "添加乙基 (-C2H5)", "type": "alkyl_group"},
+        {"name": "add_propyl", "description": "添加丙基 (-C3H7)", "type": "alkyl_group"},
+        {"name": "add_isopropyl", "description": "添加異丙基", "type": "alkyl_group"},
+        {"name": "add_butyl", "description": "添加丁基 (-C4H9)", "type": "alkyl_group"},
+        {"name": "add_tert_butyl", "description": "添加叔丁基", "type": "alkyl_group"},
+    ]
+    
+    # 官能基
+    functional_groups = [
+        {"name": "add_hydroxyl", "description": "添加羥基 (-OH)", "type": "functional_group"},
+        {"name": "add_amino", "description": "添加氨基 (-NH2)", "type": "functional_group"},
+        {"name": "add_carboxyl", "description": "添加羧基 (-COOH)", "type": "functional_group"},
+        {"name": "add_carbonyl", "description": "添加羰基 (=O)", "type": "functional_group"},
+        {"name": "add_ester", "description": "添加酯基 (-COO-)", "type": "functional_group"},
+        {"name": "add_ether", "description": "添加醚鍵 (-O-)", "type": "functional_group"},
+        {"name": "add_amide", "description": "添加醯胺基 (-CONH-)", "type": "functional_group"},
+        {"name": "add_nitrile", "description": "添加腈基 (-CN)", "type": "functional_group"},
+        {"name": "add_nitro", "description": "添加硝基 (-NO2)", "type": "functional_group"},
+        {"name": "add_sulfone", "description": "添加磺醯基 (-SO2-)", "type": "functional_group"},
+    ]
+    
+    # 鹵素
+    halogens = [
+        {"name": "add_fluorine", "description": "添加氟原子 (-F)", "type": "halogen"},
+        {"name": "add_chlorine", "description": "添加氯原子 (-Cl)", "type": "halogen"},
+        {"name": "add_bromine", "description": "添加溴原子 (-Br)", "type": "halogen"},
+        {"name": "add_iodine", "description": "添加碘原子 (-I)", "type": "halogen"},
+    ]
+    
+    # 結構修飾
+    modifications = [
+        {"name": "remove_group", "description": "移除官能基", "type": "removal"},
+        {"name": "replace_group", "description": "替換官能基", "type": "replacement"},
+        {"name": "position_change", "description": "改變取代位置", "type": "positional"},
+        {"name": "stereochemistry", "description": "改變立體化學", "type": "stereochemical"},
+        {"name": "double_bond", "description": "引入雙鍵", "type": "unsaturation"},
+        {"name": "triple_bond", "description": "引入三鍵", "type": "unsaturation"},
+    ]
+    
+    # 合併所有 actions
+    actions.extend(small_groups)
+    actions.extend(functional_groups)
+    actions.extend(halogens)
+    actions.extend(modifications)
+    
+    return actions
