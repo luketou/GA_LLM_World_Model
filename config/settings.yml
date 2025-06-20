@@ -28,7 +28,7 @@ workflow:
 # LLM 設定
 llm:
   provider: cerebras  # 使用 cerebras 而不是 openai
-  model_name: llama-3.3-70b
+  model_name: qwen-3-32b
   temperature: 0.2
   max_completion_tokens: 8192
   top_p: 1

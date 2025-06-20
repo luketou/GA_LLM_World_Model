@@ -71,17 +71,16 @@ oracle = GuacaMolOracle(cfg["TASK_NAME"])
 
 # 初始化 LLM Generator，從配置檔案讀取所有參數
 llm_config = cfg.get("llm", {}).copy()
-llm_config["max_smiles_length"] = MAX_SMILES_LENGTH  # 添加 SMILES 長度限制
 
-# 確保所有必要的參數都被傳遞
+# 確保所有必要的參數都被傳遞，並設置正確的參數名稱
 llm_gen = LLMGenerator(
     provider=llm_config.get("provider", "cerebras"),
-    model_name=llm_config.get("model_name", "llama-3.3-70b"),
+    model_name=llm_config.get("model_name", "qwen-3-32b"),
     temperature=llm_config.get("temperature", 0.2),
-    max_completion_tokens=llm_config.get("max_completion_tokens", 2048),
+    max_completion_tokens=llm_config.get("max_completion_tokens", 8192),
     max_smiles_length=llm_config.get("max_smiles_length", MAX_SMILES_LENGTH),
-    top_p=llm_config.get("top_p", 1),
-    stream=llm_config.get("stream", True),
+    top_p=llm_config.get("top_p", 1.0),
+    stream=llm_config.get("stream", False),  # 暫時關閉 stream
     api_key=llm_config.get("api_key")
 )
 
@@ -275,20 +274,102 @@ def decide(state: AgentState):
     state.advantages = []
     return state
 
+@traceable
+def expand_node(state: AgentState):
+    """
+    擴展節點：生成子節點
+    """
+    try:
+        parent_smiles = state["parent_smiles"]
+        actions = state["actions"]
+        
+        logger.info(f"Expanding: {parent_smiles} with {len(actions)} actions")
+        
+        # 確保父節點存在
+        if not engine.has_node(parent_smiles):
+            engine.initialize_root(parent_smiles)
+        
+        # 調用 MCTS 擴展
+        batch_smiles = engine.expand(
+            parent_smiles=parent_smiles,
+            actions=actions,
+            batch_size=cfg.get("workflow", {}).get("batch_size", 30)
+        )
+        
+        logger.info(f"Generated {len(batch_smiles)} child molecules")
+        
+        return {
+            **state,
+            "batch_smiles": batch_smiles
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in expand_node: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {
+            **state,
+            "batch_smiles": [],
+            "result": {"error": f"Expansion failed: {str(e)}"}
+        }
+
 def should_continue(state: AgentState):
-    """決定是否繼續工作流程"""
-    if state.result:  # 如果已經有結果，則結束
-        return END
-    return "Generate"
+    """
+    判斷是否繼續工作流程
+    """
+    try:
+        # 檢查是否有結果
+        if state.get("result") and state["result"]:
+            logger.info("Workflow completed with result")
+            return "end"
+        
+        # 檢查是否有錯誤
+        if state.get("result", {}).get("error"):
+            logger.error(f"Workflow error: {state['result']['error']}")
+            return "end"
+        
+        # 檢查 Oracle 調用次數
+        if oracle.get_remaining_calls() <= 0:
+            logger.info("Oracle calls exhausted")
+            return "end"
+        
+        # 檢查是否有 batch_smiles 需要評估
+        if state.get("batch_smiles") and not state.get("scores"):
+            return "evaluate"
+        
+        # 檢查是否有分數需要回傳
+        if state.get("scores") and not state.get("advantages"):
+            return "advantage"
+        
+        # 檢查是否需要決策下一步
+        if state.get("advantages"):
+            return "decide"
+        
+        # 檢查是否需要生成動作
+        if not state.get("actions"):
+            return "generate"
+        
+        # 檢查是否需要 LLM 生成
+        if state.get("actions") and not state.get("batch_smiles"):
+            return "expand"
+        
+        # 默認結束
+        logger.warning("Unexpected state in should_continue, ending workflow")
+        return "end"
+        
+    except Exception as e:
+        logger.error(f"Error in should_continue: {e}")
+        return "end"
 
 # ---------- LangGraph ----------
 sg = StateGraph(AgentState)
 sg.add_node("Generate", generate_actions)
 sg.add_node("LLM", llm_generate)
-sg.add_node("Oracle", oracle_score)  # 修正：使用 add_node 而不是 add_async_node
-sg.add_node("Adv", compute_adv)
-sg.add_node("UpdateStores", update_stores) # Added new node
-sg.add_node("Decide", decide)
+sg.add_node("Oracle", oracle_score)  
+sg.add_node("Adv", compute_adv) 
+sg.add_node("UpdateStores", update_stores) 
+sg.add_node("Decide", decide) 
+sg.add_node("Expand", expand_node) 
 
 sg.set_entry_point("Generate")
 sg.add_edge("Generate", "LLM")
