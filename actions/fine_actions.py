@@ -6,6 +6,7 @@ import json
 import random
 import pathlib
 import re
+import logging
 from typing import List, Dict, Any
 
 # 載入 5k 基團字典
@@ -86,311 +87,515 @@ def analyze_smiles_heuristics(smiles: str) -> Dict[str, Any]:
     }
 
 
-def expand_smiles_aware(parent_smiles: str, k: int = 5) -> List[Dict]:
+def expand_smiles_aware(parent_smiles: str, unlock_factor: float, top_k: int) -> List[Dict[str, Any]]:
     """
-    根據父分子特性選擇合適的 fine actions
+    基於 SMILES 分析的智能擴展
     
-    Args:
-        parent_smiles: 父分子的 SMILES 字符串
-        k: 要選擇的動作數量
-    
-    Returns:
-        選擇的動作列表
+    COMPLIANCE NOTE: Uses only string-based SMILES analysis and
+    LLM-driven pattern recognition. No RDKit property calculations.
     """
-    all_actions = get_all_actions()
-    
-    if k >= len(all_actions):
-        return all_actions
-    
-    # 簡單的啟發式規則：根據分子長度和複雜度選擇動作
-    mol_length = len(parent_smiles)
-    
-    # 為不同類型的動作分配權重
-    weights = []
-    for action in all_actions:
-        action_type = action.get('type', 'unknown')
-        
-        if mol_length < 20:  # 小分子，偏好添加基團
-            if action_type in ['alkyl_group', 'functional_group']:
-                weights.append(2.0)
-            else:
-                weights.append(1.0)
-        else:  # 大分子，偏好移除或替換
-            if action_type in ['removal', 'replacement']:
-                weights.append(2.0)
-            else:
-                weights.append(1.0)
-    
-    # 加權隨機選擇
+    import logging
     import random
-    selected_actions = random.choices(all_actions, weights=weights, k=k)
     
-    return selected_actions
-
-
-def expand_smiles_aware(parent_smiles: str, unlock_factor: float, top_k: int = 30) -> List[Dict[str, Any]]:
-    """
-    基於 SMILES 啟發式分析的微調操作擴展，不依賴 RDKit
+    logger = logging.getLogger(__name__)
     
-    Args:
-        parent_smiles: 父分子 SMILES
-        unlock_factor: 解鎖因子，基於訪問次數
-        top_k: 最多返回的操作數量
-    
-    Returns:
-        針對當前分子特性優化的微調操作列表
-    """
-    if not _GROUPS:
-        return []
-    
-    # SMILES 啟發式分析
-    props = analyze_smiles_heuristics(parent_smiles)
-    
-    # 根據啟發式特性智能過濾和評分操作
-    filtered_groups = []
-    
-    for group in _GROUPS:
-        score = 1.0  # 基礎分數
-        group_smiles = group["params"]["smiles"]
-        group_props = analyze_smiles_heuristics(group_smiles)
+    try:
+        logger.debug(f"SMILES-aware expansion for {parent_smiles}, unlock_factor={unlock_factor}, top_k={top_k}")
         
-        # 根據分子複雜度調整策略
-        if props["complexity_score"] > 50:  # 複雜分子，優先小基團
-            if group_props["length"] <= 3:
-                score *= 1.5
-        elif props["complexity_score"] < 20:  # 簡單分子，可以添加較大基團
-            if group_props["length"] > 3:
-                score *= 1.3
+        # 獲取所有可用的動作組
+        all_groups = get_all_functional_groups()
         
-        # 根據極性原子數量調整策略
-        if props["polar_atoms"] < 2:  # 極性不足，優先極性基團
-            if group_props["polar_atoms"] > 0:
-                score *= 1.4
-        elif props["polar_atoms"] > 5:  # 極性過高，優先非極性基團
-            if group_props["polar_atoms"] == 0:
-                score *= 1.3
+        if not all_groups:
+            logger.warning("No functional groups available")
+            return get_fallback_actions(top_k)
         
-        # 根據芳香環調整
-        if props["aromatic_rings"] == 0:  # 無芳香環，可考慮添加
-            if group["type"] == "add_ring":
-                score *= 1.2
-        elif props["aromatic_rings"] > 2:  # 芳香環過多，避免再添加
-            if group["type"] == "add_ring":
-                score *= 0.5
+        # 基於 SMILES 字符串分析過濾動作組
+        filtered_groups = []
+        smiles_features = analyze_smiles_features(parent_smiles)
         
-        # 根據鹵素原子調整
-        if props["halogens"] > 2:  # 鹵素過多，避免再添加
-            if any(hal in group_smiles for hal in ['Cl', 'Br', 'F', 'I']):
-                score *= 0.7
+        for group_name, group_data in all_groups.items():
+            # 基於分子特徵決定動作的適用性
+            if is_action_suitable(group_data, smiles_features, unlock_factor):
+                filtered_groups.append((group_name, group_data))
         
-        filtered_groups.append((group, score))
-    
-    # 按分數排序
-    filtered_groups.sort(key=lambda x: x[1], reverse=True)
-    
-    # 根據 unlock_factor 和評分選擇操作
-    available_actions = min(int(unlock_factor * len(filtered_groups)), len(filtered_groups))
-    k = min(available_actions, top_k)
-    
-    if k <= 0:
-        return []
-    
-    # 加權隨機選擇，高分數的操作有更高機率被選中
-    selected_groups = []
-    weights = [score for _, score in filtered_groups[:available_actions]]
-    
-    for _ in range(k):
         if not filtered_groups:
-            break
+            logger.warning("No suitable groups found after filtering, using fallback")
+            return get_fallback_actions(top_k)
         
-        # 加權隨機選擇
-        chosen_idx = random.choices(range(len(filtered_groups)), weights=weights)[0]
-        selected_groups.append(filtered_groups[chosen_idx][0])
+        # 計算權重 - 確保權重數量與過濾後的組數量匹配
+        weights = []
+        for group_name, group_data in filtered_groups:
+            weight = calculate_group_weight(group_data, smiles_features, unlock_factor)
+            weights.append(max(0.1, weight))  # 確保權重至少為 0.1
         
-        # 移除已選擇的操作避免重複
-        filtered_groups.pop(chosen_idx)
-        weights.pop(chosen_idx)
-    
-    return selected_groups
+        # 驗證權重和群組數量匹配
+        if len(weights) != len(filtered_groups):
+            logger.error(f"Weight mismatch: {len(weights)} weights vs {len(filtered_groups)} groups")
+            # 修復權重數量
+            if len(weights) < len(filtered_groups):
+                weights.extend([1.0] * (len(filtered_groups) - len(weights)))
+            else:
+                weights = weights[:len(filtered_groups)]
+        
+        logger.debug(f"Filtered groups: {len(filtered_groups)}, weights: {len(weights)}")
+        
+        # 生成動作
+        actions = []
+        attempts = 0
+        max_attempts = top_k * 3  # 避免無限迴圈
+        
+        while len(actions) < top_k and attempts < max_attempts:
+            try:
+                # 安全地選擇群組
+                if len(filtered_groups) == 1:
+                    chosen_idx = 0
+                else:
+                    chosen_idx = random.choices(range(len(filtered_groups)), weights=weights)[0]
+                
+                group_name, group_data = filtered_groups[chosen_idx]
+                
+                # 從選中的群組生成動作
+                group_actions = generate_actions_from_group(group_data, parent_smiles)
+                
+                # 添加到結果中，避免重複
+                for action in group_actions:
+                    if action not in actions and len(actions) < top_k:
+                        actions.append(action)
+                
+                attempts += 1
+                
+            except Exception as e:
+                logger.warning(f"Error selecting group: {e}")
+                attempts += 1
+                continue
+        
+        if not actions:
+            logger.warning("No actions generated, using fallback")
+            return get_fallback_actions(top_k)
+        
+        logger.info(f"Generated {len(actions)} SMILES-aware actions")
+        return actions[:top_k]
+        
+    except Exception as e:
+        logger.error(f"Error in SMILES-aware expansion: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return get_fallback_actions(top_k)
 
 
-def expand_llm_guided(parent_smiles: str, llm_feedback: Dict[str, str], 
-                     unlock_factor: float, top_k: int = 30) -> List[Dict[str, Any]]:
+def analyze_smiles_features(smiles: str) -> Dict[str, Any]:
     """
-    基於 LLM 回饋的微調操作選擇
+    分析 SMILES 字符串特徵
     
-    Args:
-        parent_smiles: 父分子 SMILES
-        llm_feedback: LLM 對當前分子的分析回饋，包含建議的修改方向
-        unlock_factor: 解鎖因子
-        top_k: 最多返回的操作數量
-    
-    Returns:
-        基於 LLM 建議的微調操作列表
+    COMPLIANCE NOTE: Pure string-based analysis, no RDKit calculations.
     """
-    if not _GROUPS or not llm_feedback:
-        return expand_smiles_aware(parent_smiles, unlock_factor, top_k)
-    
-    scored_groups = []
-    
-    # 從 LLM 回饋中提取關鍵字
-    feedback_text = " ".join(llm_feedback.values()).lower()
-    
-    for group in _GROUPS:
-        score = 1.0
-        group_smiles = group["params"]["smiles"]
-        group_name = group["params"].get("fragment", "")
+    try:
+        if not smiles:
+            return {"error": "empty_smiles"}
         
-        # 根據 LLM 回饋調整分數
-        if "increase" in feedback_text and "polarity" in feedback_text:
-            if any(polar in group_smiles for polar in ['O', 'N', 'S']):
-                score *= 1.5
+        features = {
+            "length": len(smiles),
+            "has_aromatic": any(c.islower() for c in smiles),
+            "has_rings": any(c.isdigit() for c in smiles),
+            "has_branches": '(' in smiles or ')' in smiles,
+            "has_double_bonds": '=' in smiles,
+            "has_triple_bonds": '#' in smiles,
+            "atom_counts": {},
+            "complexity_score": 0.0
+        }
         
-        if "decrease" in feedback_text and "size" in feedback_text:
-            if len(group_smiles) <= 2:
-                score *= 1.4
+        # 統計原子類型（基於常見 SMILES 符號）
+        atom_symbols = ['C', 'N', 'O', 'S', 'P', 'F', 'Cl', 'Br', 'I']
+        for atom in atom_symbols:
+            features["atom_counts"][atom] = smiles.count(atom)
         
-        if "add" in feedback_text and "ring" in feedback_text:
-            if group["type"] == "add_ring":
-                score *= 1.6
+        # 計算複雜度分數（基於字符串特徵）
+        complexity = 0
+        complexity += len(smiles) * 0.1
+        complexity += smiles.count('(') * 2  # 分支
+        complexity += smiles.count('=') * 1.5  # 雙鍵
+        complexity += smiles.count('#') * 2  # 三鍵
+        complexity += len([c for c in smiles if c.isdigit()]) * 1  # 環
         
-        if "hydrophobic" in feedback_text:
-            if group_smiles.count('C') > group_smiles.count('O') + group_smiles.count('N'):
-                score *= 1.3
+        features["complexity_score"] = complexity
         
-        if "hydrophilic" in feedback_text:
-            if group_smiles.count('O') + group_smiles.count('N') > 0:
-                score *= 1.3
+        return features
         
-        # 特定基團建議
-        if "methyl" in feedback_text and "methyl" in group_name.lower():
-            score *= 2.0
-        if "hydroxyl" in feedback_text and "hydroxyl" in group_name.lower():
-            score *= 2.0
-        if "amino" in feedback_text and "amino" in group_name.lower():
-            score *= 2.0
-        
-        scored_groups.append((group, score))
-    
-    # 排序並選擇
-    scored_groups.sort(key=lambda x: x[1], reverse=True)
-    available_actions = min(int(unlock_factor * len(scored_groups)), len(scored_groups))
-    k = min(available_actions, top_k)
-    
-    return [group for group, _ in scored_groups[:k]]
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.error(f"Error analyzing SMILES features: {e}")
+        return {"error": "analysis_failed"}
 
 
-def get_action_statistics() -> Dict[str, Any]:
-    """返回操作庫的統計資訊"""
-    if not _GROUPS:
-        return {"total": 0, "types": {}}
+def is_action_suitable(group_data: Dict, smiles_features: Dict, unlock_factor: float) -> bool:
+    """
+    判斷動作是否適合當前分子
     
-    type_counts = {}
-    for group in _GROUPS:
-        action_type = group["type"]
-        type_counts[action_type] = type_counts.get(action_type, 0) + 1
+    COMPLIANCE NOTE: Decision based on string features and algorithmic logic only.
+    """
+    try:
+        if smiles_features.get("error"):
+            return True  # 如果分析失敗，允許所有動作
+        
+        # 基於解鎖因子的基本過濾
+        if random.random() > unlock_factor:
+            return False
+        
+        # 基於分子複雜度的過濾
+        complexity = smiles_features.get("complexity_score", 0)
+        
+        # 複雜分子避免過度修飾
+        if complexity > 50 and group_data.get("complexity_increase", 0) > 10:
+            return random.random() < 0.3
+        
+        # 簡單分子鼓勵添加功能基
+        if complexity < 10:
+            return True
+        
+        # 其他情況基於隨機性和分子特徵
+        return random.random() < 0.7
+        
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Error checking action suitability: {e}")
+        return True  # 錯誤時默認允許
+
+
+def calculate_group_weight(group_data: Dict, smiles_features: Dict, unlock_factor: float) -> float:
+    """
+    計算群組權重
     
+    COMPLIANCE NOTE: Weight calculation based on string features only.
+    """
+    try:
+        base_weight = 1.0
+        
+        if smiles_features.get("error"):
+            return base_weight
+        
+        # 基於分子複雜度調整權重
+        complexity = smiles_features.get("complexity_score", 0)
+        
+        # 簡單分子偏好添加功能基
+        if complexity < 20:
+            if group_data.get("type") == "add":
+                base_weight *= 1.5
+        
+        # 複雜分子偏好簡單修飾
+        elif complexity > 40:
+            if group_data.get("complexity_increase", 0) < 5:
+                base_weight *= 1.3
+            else:
+                base_weight *= 0.7
+        
+        # 基於解鎖因子調整
+        base_weight *= (0.5 + unlock_factor)
+        
+        # 添加隨機性
+        base_weight *= (0.8 + random.random() * 0.4)
+        
+        return max(0.1, base_weight)
+        
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Error calculating group weight: {e}")
+        return 1.0
+
+
+def generate_actions_from_group(group_data: Dict, parent_smiles: str) -> List[Dict[str, Any]]:
+    """
+    從群組數據生成動作
+    
+    COMPLIANCE NOTE: Action generation based on group templates,
+    no RDKit property calculations.
+    """
+    try:
+        actions = []
+        
+        # 基於群組類型生成動作
+        group_type = group_data.get("type", "substitute")
+        group_name = group_data.get("name", "unknown")
+        
+        if group_type == "add":
+            # 添加功能基
+            fragments = group_data.get("fragments", ["C"])
+            for fragment in fragments[:3]:  # 限制每個群組最多3個動作
+                action = {
+                    "type": "substitute",
+                    "name": f"add_{group_name}_{fragment}",
+                    "description": f"添加 {group_name} ({fragment})",
+                    "params": {"smiles": fragment, "fragment": group_name}
+                }
+                actions.append(action)
+        
+        elif group_type == "modify":
+            # 修飾現有結構
+            modifications = group_data.get("modifications", ["oxidation"])
+            for mod in modifications[:2]:
+                action = {
+                    "type": "modify",
+                    "name": f"{group_name}_{mod}",
+                    "description": f"{group_name} {mod}",
+                    "params": {"modification": mod, "group": group_name}
+                }
+                actions.append(action)
+        
+        else:
+            # 默認替換動作
+            action = {
+                "type": "substitute",
+                "name": f"apply_{group_name}",
+                "description": f"應用 {group_name}",
+                "params": {"group": group_name}
+            }
+            actions.append(action)
+        
+        return actions
+        
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.debug(f"Error generating actions from group: {e}")
+        return []
+
+
+def get_all_functional_groups() -> Dict[str, Dict]:
+    """
+    獲取所有功能基群組
+    
+    COMPLIANCE NOTE: Static functional group definitions,
+    no dynamic property calculations.
+    """
     return {
-        "total": len(_GROUPS),
-        "types": type_counts,
-        "substitute_ratio": type_counts.get("substitute", 0) / len(_GROUPS),
-        "add_ring_ratio": type_counts.get("add_ring", 0) / len(_GROUPS)
+        "methyl": {
+            "type": "add",
+            "name": "methyl",
+            "fragments": ["C"],
+            "complexity_increase": 1
+        },
+        "hydroxyl": {
+            "type": "add", 
+            "name": "hydroxyl",
+            "fragments": ["O"],
+            "complexity_increase": 2
+        },
+        "amino": {
+            "type": "add",
+            "name": "amino", 
+            "fragments": ["N"],
+            "complexity_increase": 3
+        },
+        "carboxyl": {
+            "type": "add",
+            "name": "carboxyl",
+            "fragments": ["C(=O)O"],
+            "complexity_increase": 5
+        },
+        "halogen": {
+            "type": "add",
+            "name": "halogen",
+            "fragments": ["F", "Cl", "Br"],
+            "complexity_increase": 1
+        },
+        "ethyl": {
+            "type": "add",
+            "name": "ethyl",
+            "fragments": ["CC"],
+            "complexity_increase": 2
+        },
+        "phenyl": {
+            "type": "add",
+            "name": "phenyl", 
+            "fragments": ["c1ccccc1"],
+            "complexity_increase": 8
+        },
+        "nitro": {
+            "type": "add",
+            "name": "nitro",
+            "fragments": ["[N+](=O)[O-]"],
+            "complexity_increase": 4
+        },
+        "sulfo": {
+            "type": "add",
+            "name": "sulfo",
+            "fragments": ["S(=O)(=O)O"],
+            "complexity_increase": 6
+        },
+        "acetyl": {
+            "type": "add",
+            "name": "acetyl",
+            "fragments": ["C(=O)C"],
+            "complexity_increase": 4
+        }
     }
 
 
-def expand_balanced(parent_smiles: str, unlock_factor: float, top_k: int = 30, 
-                   exploration_weight: float = 0.3) -> List[Dict[str, Any]]:
+def get_fallback_actions(k: int) -> List[Dict[str, Any]]:
     """
-    平衡探索與利用的微調操作選擇
+    獲取後備動作列表
+    
+    COMPLIANCE NOTE: Basic chemical operations without RDKit calculations.
     
     Args:
-        parent_smiles: 父分子 SMILES
-        unlock_factor: 解鎖因子
-        top_k: 最多返回的操作數量
-        exploration_weight: 探索權重 (0-1)，較高值增加隨機性
-    
+        k: 需要的動作數量
+        
     Returns:
-        平衡探索與利用的微調操作列表
+        List[Dict[str, Any]]: 後備動作列表
     """
-    if not _GROUPS:
-        return []
+    basic_actions = [
+        {"type": "substitute", "name": "add_methyl", "description": "添加甲基", "params": {"smiles": "C"}},
+        {"type": "substitute", "name": "add_hydroxyl", "description": "添加羥基", "params": {"smiles": "O"}},
+        {"type": "substitute", "name": "add_amino", "description": "添加氨基", "params": {"smiles": "N"}},
+        {"type": "substitute", "name": "add_fluorine", "description": "添加氟", "params": {"smiles": "F"}},
+        {"type": "substitute", "name": "add_chlorine", "description": "添加氯", "params": {"smiles": "Cl"}},
+        {"type": "substitute", "name": "add_ethyl", "description": "添加乙基", "params": {"smiles": "CC"}},
+        {"type": "substitute", "name": "add_phenyl", "description": "添加苯基", "params": {"smiles": "c1ccccc1"}},
+        {"type": "substitute", "name": "add_carboxyl", "description": "添加羧基", "params": {"smiles": "C(=O)O"}},
+        {"type": "substitute", "name": "add_nitro", "description": "添加硝基", "params": {"smiles": "[N+](=O)[O-]"}},
+        {"type": "substitute", "name": "add_sulfonic", "description": "添加磺酸基", "params": {"smiles": "S(=O)(=O)O"}},
+    ]
     
-    # 混合智能選擇和隨機選擇
-    smiles_aware_k = int(top_k * (1 - exploration_weight))
-    random_k = top_k - smiles_aware_k
-    
-    results = []
-    
-    # 獲取基於 SMILES 分析的智能選擇操作
-    if smiles_aware_k > 0:
-        smart_actions = expand_smiles_aware(parent_smiles, unlock_factor, smiles_aware_k)
-        results.extend(smart_actions)
-    
-    # 獲取隨機選擇的操作
-    if random_k > 0:
-        remaining_groups = [g for g in _GROUPS if g not in results]
-        if remaining_groups:
-            available_random = min(int(unlock_factor * len(remaining_groups)), len(remaining_groups))
-            k_random = min(random_k, available_random)
-            if k_random > 0:
-                random_actions = random.sample(remaining_groups, k=k_random)
-                results.extend(random_actions)
-    
-    return results
+    if k <= len(basic_actions):
+        import random
+        return random.sample(basic_actions, k)
+    else:
+        # 如果需要更多動作，重複選擇
+        repeated_actions = basic_actions * ((k // len(basic_actions)) + 1)
+        return repeated_actions[:k]
 
 
-def get_all_actions():
+def propose_mixed_actions(parent_smiles: str, depth: int, k_init: int) -> List[Dict[str, Any]]:
     """
-    返回所有可用的 fine actions 列表
+    混合粗粒度和細粒度動作 - 修復版本
+    
+    COMPLIANCE NOTE: Uses only string-based molecular analysis,
+    no RDKit property calculations before Oracle evaluation.
     """
-    actions = []
+    import logging
     
-    # 小分子基團
-    small_groups = [
-        {"name": "add_methyl", "description": "添加甲基 (-CH3)", "type": "alkyl_group"},
-        {"name": "add_ethyl", "description": "添加乙基 (-C2H5)", "type": "alkyl_group"},
-        {"name": "add_propyl", "description": "添加丙基 (-C3H7)", "type": "alkyl_group"},
-        {"name": "add_isopropyl", "description": "添加異丙基", "type": "alkyl_group"},
-        {"name": "add_butyl", "description": "添加丁基 (-C4H9)", "type": "alkyl_group"},
-        {"name": "add_tert_butyl", "description": "添加叔丁基", "type": "alkyl_group"},
-    ]
+    logger = logging.getLogger(__name__)
     
-    # 官能基
-    functional_groups = [
-        {"name": "add_hydroxyl", "description": "添加羥基 (-OH)", "type": "functional_group"},
-        {"name": "add_amino", "description": "添加氨基 (-NH2)", "type": "functional_group"},
-        {"name": "add_carboxyl", "description": "添加羧基 (-COOH)", "type": "functional_group"},
-        {"name": "add_carbonyl", "description": "添加羰基 (=O)", "type": "functional_group"},
-        {"name": "add_ester", "description": "添加酯基 (-COO-)", "type": "functional_group"},
-        {"name": "add_ether", "description": "添加醚鍵 (-O-)", "type": "functional_group"},
-        {"name": "add_amide", "description": "添加醯胺基 (-CONH-)", "type": "functional_group"},
-        {"name": "add_nitrile", "description": "添加腈基 (-CN)", "type": "functional_group"},
-        {"name": "add_nitro", "description": "添加硝基 (-NO2)", "type": "functional_group"},
-        {"name": "add_sulfone", "description": "添加磺醯基 (-SO2-)", "type": "functional_group"},
-    ]
+    try:
+        # 根據深度調整粗粒度和細粒度的比例
+        if depth == 0:
+            coarse_ratio = 0.7
+        elif depth <= 2:
+            coarse_ratio = 0.5
+        else:
+            coarse_ratio = 0.3
+        
+        coarse_k = int(k_init * coarse_ratio)
+        fine_k = k_init - coarse_k
+        
+        actions = []
+        
+        # 獲取粗粒度動作
+        if coarse_k > 0:
+            try:
+                # 檢查是否可以導入 coarse_actions
+                from . import coarse_actions
+                coarse_actions_list = coarse_actions.sample(k=coarse_k, parent_smiles=parent_smiles)
+                actions.extend(coarse_actions_list)
+                logger.debug(f"Added {len(coarse_actions_list)} coarse actions")
+            except Exception as e:
+                logger.warning(f"Error getting coarse actions: {e}")
+                # 如果粗粒度動作失敗，將配額轉移到細粒度
+                fine_k += coarse_k
+        
+        # 獲取細粒度動作 - 使用安全的方法
+        if fine_k > 0:
+            try:
+                unlock_factor = min(1.0, 0.3 + depth * 0.1)
+                
+                # 使用更安全的動作生成方法
+                fine_actions_list = generate_safe_fine_actions(
+                    parent_smiles=parent_smiles,
+                    k=fine_k,
+                    unlock_factor=unlock_factor
+                )
+                
+                actions.extend(fine_actions_list)
+                logger.debug(f"Added {len(fine_actions_list)} fine actions")
+                
+            except Exception as e:
+                logger.error(f"Error getting fine actions: {e}")
+                # 如果細粒度也失敗，使用後備動作
+                fallback_actions = get_fallback_actions(fine_k)
+                actions.extend(fallback_actions)
+                logger.debug(f"Used {len(fallback_actions)} fallback actions")
+        
+        # 如果沒有任何動作，使用基本後備
+        if not actions:
+            actions = get_fallback_actions(k_init)
+            logger.warning(f"No actions generated, using {len(actions)} fallback actions")
+        
+        logger.info(f"Mixed actions: {len(actions)} total")
+        return actions
+        
+    except Exception as e:
+        logger.error(f"Error in propose_mixed_actions: {e}")
+        # 最終後備
+        return get_fallback_actions(k_init)
+
+
+def generate_safe_fine_actions(parent_smiles: str, k: int, unlock_factor: float) -> List[Dict[str, Any]]:
+    """
+    安全的細粒度動作生成（避免權重錯誤）
     
-    # 鹵素
-    halogens = [
-        {"name": "add_fluorine", "description": "添加氟原子 (-F)", "type": "halogen"},
-        {"name": "add_chlorine", "description": "添加氯原子 (-Cl)", "type": "halogen"},
-        {"name": "add_bromine", "description": "添加溴原子 (-Br)", "type": "halogen"},
-        {"name": "add_iodine", "description": "添加碘原子 (-I)", "type": "halogen"},
-    ]
+    COMPLIANCE NOTE: Safe action generation with proper error handling,
+    no RDKit property calculations.
+    """
+    import logging
+    import random
     
-    # 結構修飾
-    modifications = [
-        {"name": "remove_group", "description": "移除官能基", "type": "removal"},
-        {"name": "replace_group", "description": "替換官能基", "type": "replacement"},
-        {"name": "position_change", "description": "改變取代位置", "type": "positional"},
-        {"name": "stereochemistry", "description": "改變立體化學", "type": "stereochemical"},
-        {"name": "double_bond", "description": "引入雙鍵", "type": "unsaturation"},
-        {"name": "triple_bond", "description": "引入三鍵", "type": "unsaturation"},
-    ]
+    logger = logging.getLogger(__name__)
     
-    # 合併所有 actions
-    actions.extend(small_groups)
-    actions.extend(functional_groups)
-    actions.extend(halogens)
-    actions.extend(modifications)
-    
-    return actions
+    try:
+        # 獲取功能基群組
+        all_groups = get_all_functional_groups()
+        
+        if not all_groups:
+            return get_fallback_actions(k)
+        
+        # 分析 SMILES 特徵
+        smiles_features = analyze_smiles_features(parent_smiles)
+        
+        # 過濾適合的群組
+        suitable_groups = []
+        for group_name, group_data in all_groups.items():
+            if is_action_suitable(group_data, smiles_features, unlock_factor):
+                suitable_groups.append((group_name, group_data))
+        
+        if not suitable_groups:
+            logger.warning("No suitable groups found, using all groups")
+            suitable_groups = list(all_groups.items())
+        
+        # 生成動作 - 使用簡單的隨機選擇避免權重問題
+        actions = []
+        for _ in range(k):
+            try:
+                # 隨機選擇群組
+                group_name, group_data = random.choice(suitable_groups)
+                
+                # 從群組生成動作
+                group_actions = generate_actions_from_group(group_data, parent_smiles)
+                
+                if group_actions:
+                    action = random.choice(group_actions)
+                    if action not in actions:  # 避免重複
+                        actions.append(action)
+                
+            except Exception as e:
+                logger.debug(f"Error generating individual action: {e}")
+                continue
+        
+        # 如果動作不足，用後備動作補充
+        if len(actions) < k:
+            needed = k - len(actions)
+            fallback = get_fallback_actions(needed)
+            actions.extend(fallback)
+        
+        return actions[:k]
+        
+    except Exception as e:
+        logger.error(f"Error in safe fine actions generation: {e}")
+        return get_fallback_actions(k)

@@ -166,48 +166,76 @@ def compute_adv(state: AgentState):
 
 @traceable # Added traceable decorator
 def update_stores(state: AgentState):
-    # Update Knowledge Graph
+    # Update Knowledge Graph and MCTS Engine
     # Ensure actions, batch_smiles, scores, advantages are all populated and have same length
-    if not all([hasattr(state, attr) and state.actions and state.batch_smiles and state.scores and state.advantages and
-                len(state.actions) == len(state.batch_smiles) == len(state.scores) == len(state.advantages)
-                for attr in ['actions', 'batch_smiles', 'scores', 'advantages']]):
-        print("Warning: Skipping KG/MCTS update due to inconsistent state data.")
-        # Potentially raise an error or handle more gracefully
+    if not all([hasattr(state, attr) and getattr(state, attr) for attr in ['actions', 'batch_smiles', 'scores', 'advantages']]):
+        print("Warning: Skipping KG/MCTS update due to missing state data.")
         return state
+        
+    if not (len(state.actions) == len(state.batch_smiles) == len(state.scores) == len(state.advantages)):
+        print(f"Warning: Inconsistent state data lengths: actions={len(state.actions)}, smiles={len(state.batch_smiles)}, scores={len(state.scores)}, advantages={len(state.advantages)}")
+        # 取最小長度
+        min_len = min(len(state.actions), len(state.batch_smiles), len(state.scores), len(state.advantages))
+        state.actions = state.actions[:min_len]
+        state.batch_smiles = state.batch_smiles[:min_len]
+        state.scores = state.scores[:min_len]
+        state.advantages = state.advantages[:min_len]
+        print(f"Trimmed to length: {min_len}")
 
+    # 首先確保父節點存在於 MCTS 樹中
+    if not engine.has_node(state.parent_smiles):
+        engine.get_or_create_node(state.parent_smiles, state.depth)
+        print(f"[Debug] Created parent node: {state.parent_smiles}")
+
+    # 創建子節點並更新 MCTS 樹
     for i in range(len(state.batch_smiles)):
-        action_taken = state.actions[i]
-        generated_smiles = state.batch_smiles[i]
+        child_smiles = state.batch_smiles[i]
         score = state.scores[i]
         advantage = state.advantages[i]
+        action_taken = state.actions[i]
+        
+        # 創建子節點
+        child_node = engine.get_or_create_node(child_smiles, state.depth + 1)
+        child_node.parent = engine.get_node(state.parent_smiles)
+        
+        # 將子節點添加到父節點
+        parent_node = engine.get_node(state.parent_smiles)
+        if parent_node and child_smiles not in parent_node.children:
+            parent_node.children[child_smiles] = child_node
+            print(f"[Debug] Added child {child_smiles[:20]}... to parent")
+        
+        # 更新子節點分數
+        child_node.update(score)
+        child_node.advantage = advantage
+        
+        # 更新最佳節點
+        if not engine.best or score > engine.best.avg_score:
+            engine.best = child_node
+            print(f"[Debug] New best: {child_smiles[:30]}... score={score:.4f}")
 
         # Log molecule in Knowledge Graph
-        # Assuming kg.create_molecule and kg.create_action signatures
-        # These methods would be defined in your kg_store.py
-        kg.create_molecule(
-            smiles=generated_smiles,
-            score=score,
-            advantage=advantage,
-            # parent_smiles=state.parent_smiles, # If needed by create_molecule
-            # action_details=action_taken # If needed by create_molecule
-        )
-        
-        # Log action and its result in Knowledge Graph
-        kg.create_action(
-            parent_smiles=state.parent_smiles,
-            child_smiles=generated_smiles,
-            action_type=action_taken.get("type", "unknown"),
-            action_params=str(action_taken.get("params", {})),
-            score_delta=score
-        )
+        try:
+            kg.create_molecule(
+                smiles=child_smiles,
+                score=score,
+                advantage=advantage,
+            )
+            
+            # Log action and its result in Knowledge Graph
+            kg.create_action(
+                parent_smiles=state.parent_smiles,
+                child_smiles=child_smiles,
+                action_type=action_taken.get("type", "unknown"),
+                action_params=str(action_taken.get("params", {})),
+                score_delta=score
+            )
+        except Exception as e:
+            print(f"[Debug] KG update error: {e}")
 
-    # Update MCTS Engine
-    engine.update_batch(
-        state.parent_smiles,
-        state.batch_smiles,
-        state.scores,
-        state.advantages
-    )
+    # 反向傳播分數
+    engine.backpropagate(state.batch_smiles, state.scores)
+    
+    print(f"[Debug] MCTS update complete: parent has {len(engine.get_node(state.parent_smiles).children)} children")
     return state
 
 @traceable # Added traceable decorator
@@ -318,44 +346,24 @@ def should_continue(state: AgentState):
     判斷是否繼續工作流程
     """
     try:
-        # 檢查是否有結果
-        if state.get("result") and state["result"]:
+        # 檢查是否有結果（終止條件）
+        if hasattr(state, 'result') and state.result:
             logger.info("Workflow completed with result")
             return "end"
         
         # 檢查是否有錯誤
-        if state.get("result", {}).get("error"):
-            logger.error(f"Workflow error: {state['result']['error']}")
+        if hasattr(state, 'result') and state.result and state.result.get("error"):
+            logger.error(f"Workflow error: {state.result['error']}")
             return "end"
         
         # 檢查 Oracle 調用次數
-        if oracle.get_remaining_calls() <= 0:
+        if oracle.calls_left <= 0:
             logger.info("Oracle calls exhausted")
             return "end"
         
-        # 檢查是否有 batch_smiles 需要評估
-        if state.get("batch_smiles") and not state.get("scores"):
-            return "evaluate"
-        
-        # 檢查是否有分數需要回傳
-        if state.get("scores") and not state.get("advantages"):
-            return "advantage"
-        
-        # 檢查是否需要決策下一步
-        if state.get("advantages"):
-            return "decide"
-        
-        # 檢查是否需要生成動作
-        if not state.get("actions"):
-            return "generate"
-        
-        # 檢查是否需要 LLM 生成
-        if state.get("actions") and not state.get("batch_smiles"):
-            return "expand"
-        
-        # 默認結束
-        logger.warning("Unexpected state in should_continue, ending workflow")
-        return "end"
+        # 正常流程：繼續生成
+        logger.debug("Continuing workflow to Generate node")
+        return "Generate"
         
     except Exception as e:
         logger.error(f"Error in should_continue: {e}")
@@ -377,7 +385,14 @@ sg.add_edge("LLM", "Oracle")
 sg.add_edge("Oracle", "Adv")
 sg.add_edge("Adv", "UpdateStores") # Edge to new node
 sg.add_edge("UpdateStores", "Decide") # Edge from new node
-sg.add_conditional_edges("Decide", should_continue, {"Generate": "Generate", END: END})
+sg.add_conditional_edges(
+    "Decide", 
+    should_continue, 
+    {
+        "Generate": "Generate",
+        "end": END  # 修復：正確映射 "end" 到 END
+    }
+)
 
 # 直接編譯，不使用 checkpoint，並設置遞歸限制
 graph_app = sg.compile()
