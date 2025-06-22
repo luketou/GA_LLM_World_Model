@@ -11,12 +11,13 @@ logger = logging.getLogger(__name__)
 
 # 使用條件導入以避免循環導入問題
 try:
-    from .node import Node
-    from .uct import UCTSelector
-    from .progressive_widening import ProgressiveWidening
-    from .search_strategies import SearchStrategies
-    from .tree_analytics import TreeAnalytics
-    from .tree_manipulator import TreeManipulator
+    # Use absolute imports instead of relative imports
+    from mcts.node import Node
+    from mcts.uct import UCTSelector
+    from mcts.progressive_widening import ProgressiveWidening
+    from mcts.search_strategies import SearchStrategies
+    from mcts.tree_analytics import TreeAnalytics
+    from mcts.tree_manipulator import TreeManipulator
 except ImportError as e:
     logger.warning(f"Import error in mcts_engine: {e}")
     # 如果導入失敗，創建簡單的替代類

@@ -12,6 +12,14 @@ beta_pw: 0.6
 grpo_eps: 0.2
 max_depth: 50  # search tree 最大深度
 
+mcts:
+  c_uct: 1.4
+  divisity_weight: 0.1
+  prune_interval: 25 # 每 25 次迭代進行一次 pruning
+  max_tree_size: 1000 # 最大樹大小，超過此大小將停止擴展樹
+  keep_top_k : 100 # 修剪時保留的最佳子樹數量
+# GRPO 設定
+ 
 # Oracle 設定
 oracle_limit: 500
 oracle_rate: 600_per_hour                  # 令牌桶
@@ -19,6 +27,7 @@ smi_file: data/guacamol_v1_all.txt
 
 # 工作流程設定
 workflow:
+  batch_size: 30
   recursion_limit: 1000                     # LangGraph 遞迴限制，預設為 50
   max_iterations: 1000                     # 最大迭代次數
   early_stop_threshold: 0.9                # 早停閾值：找到此分數以上的分子就停止

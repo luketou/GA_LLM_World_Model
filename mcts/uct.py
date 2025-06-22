@@ -1,41 +1,43 @@
+import sys
+import os
+
+# Add project root to Python path
+project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
+# Use absolute import instead of relative import
+from llm.generator import LLMGenerator
+from node import Node
+
 import math
 import logging
-from typing import Optional
-from .node import Node
+from typing import Optional, Dict, List
 
 logger = logging.getLogger(__name__)
 
 class UCTSelector:
-    """UCT 選擇策略"""
+    """
+    增強的 UCT 選擇器，集成化學多樣性獎勵
+    """
     
-    def __init__(self, c_uct: float = 1.414):
-        """
-        初始化 UCT 選擇器
-        
-        Args:
-            c_uct: UCT 探索常數
-        """
+    def __init__(self, c_uct: float = 1.414, diversity_weight: float = 0.1, llm_gen: Optional[LLMGenerator] = None):
         self.c_uct = c_uct
-    
+        self.diversity_weight = diversity_weight
+        self.llm_gen = llm_gen
+        
     def select_best_child(self, parent: Node) -> Optional[Node]:
         """
-        使用 UCT 公式選擇最佳子節點
-        
-        Args:
-            parent: 父節點
-            
-        Returns:
-            Optional[Node]: 最佳子節點，如果沒有則返回 None
+        使用增強的 UCT 分數選擇最佳子節點
         """
         if not parent.children:
             logger.debug(f"No children found for {parent.smiles}")
             return None
-
-        best_score = float('-inf')
+            
         best_child = None
+        best_score = float('-inf')
         
-        # 計算 UCT 分數
-        for child in parent.children.values():
+        for child_smiles, child in parent.children.items():
             uct_score = self.calculate_uct_score(child, parent)
             
             logger.debug(f"Child {child.smiles}: UCT={uct_score:.4f}")
@@ -46,207 +48,155 @@ class UCTSelector:
 
         if best_child:
             logger.debug(f"Selected best child: {best_child.smiles} with UCT score: {best_score:.4f}")
-        
+                
         return best_child
     
     def calculate_uct_score(self, child: Node, parent: Node) -> float:
         """
-        計算 UCT 分數
-        
-        Args:
-            child: 子節點
-            parent: 父節點
-            
-        Returns:
-            float: UCT 分數
+        計算增強的 UCT 分數，包含多樣性獎勵
         """
+        # 標準 UCT 計算
         if child.visits == 0:
-            return float('inf')  # 未訪問的節點優先
+            return float('inf')  # 未訪問的節點優先探索
         
-        # 標準 UCT 公式
+        # 利用項 (Exploitation)
         exploitation = child.avg_score
-        exploration = self.c_uct * math.sqrt(math.log(parent.visits) / child.visits)
         
-        # 添加多樣性獎勵 - 僅使用允許的方法
-        diversity_bonus = self.calculate_diversity_bonus(child.smiles, parent.smiles)
+        # 探索項 (Exploration)
+        if parent.visits == 0:
+            exploration = 0
+        else:
+            exploration = self.c_uct * math.sqrt(math.log(parent.visits) / child.visits)
         
-        return exploitation + exploration + diversity_bonus
+        # 基礎 UCT 分數
+        uct_score = exploitation + exploration
+        
+        # 多樣性獎勵 (基於 LLM 字符串分析)
+        diversity_bonus = self._calculate_diversity_bonus(child, parent)
+        
+        # 最終分數
+        final_score = uct_score + self.diversity_weight * diversity_bonus
+        
+        logger.debug(f"UCT: child={child.smiles[:20]}, exploitation={exploitation:.4f}, "
+                    f"exploration={exploration:.4f}, diversity={diversity_bonus:.4f}, "
+                    f"final={final_score:.4f}")
+        
+        return final_score
     
-    def calculate_diversity_bonus(self, child_smiles: str, parent_smiles: str) -> float:
+    def _calculate_diversity_bonus(self, child: Node, parent: Node) -> float:
         """
-        計算多樣性獎勵
-        
-        STRICT COMPLIANCE ENFORCEMENT:
-        Before oracle evaluation, NO RDKit molecular property calculations are permitted
-        except molecular weight. All other property analysis must be LLM-driven or 
-        algorithmic without cheminformatics tools.
-        
-        Args:
-            child_smiles: 子節點 SMILES
-            parent_smiles: 父節點 SMILES
-            
-        Returns:
-            float: 多樣性獎勵分數
+        計算多樣性獎勵，避免使用 RDKit，改用 LLM 進行化學相似性分析
         """
+        if not parent.children or len(parent.children) <= 1:
+            return 0.0  # 無兄弟節點，無需多樣性獎勵
+        
         try:
-            # COMPLIANCE CHECK: Only molecular weight calculation allowed
-            from rdkit import Chem
-            from rdkit.Chem import rdMolDescriptors
+            # 收集兄弟節點 SMILES（排除自己）
+            sibling_smiles = [smiles for smiles in parent.children.keys() if smiles != child.smiles]
             
-            child_mol = Chem.MolFromSmiles(child_smiles)
-            parent_mol = Chem.MolFromSmiles(parent_smiles)
-            
-            if child_mol is None or parent_mol is None:
+            if not sibling_smiles:
                 return 0.0
             
-            # ALLOWED: Only molecular weight calculation before Oracle evaluation
-            child_mw = rdMolDescriptors.CalcExactMolWt(child_mol)
-            parent_mw = rdMolDescriptors.CalcExactMolWt(parent_mol)
+            # 基礎多樣性指標：分子量差異
+            molecular_weight_diversity = self._calculate_molecular_weight_diversity(child.smiles, sibling_smiles)
             
-            # REMOVED: rdMolDescriptors.CalcNumRings() - STRICTLY FORBIDDEN before Oracle
-            # Using LLM-driven string analysis instead for structural diversity
+            # LLM 基礎的結構多樣性分析
+            llm_diversity_score = self._get_llm_diversity_score(child.smiles, sibling_smiles)
             
-            # Calculate diversity based on molecular weight difference (ALLOWED)
-            mw_diff = abs(child_mw - parent_mw) / max(child_mw, parent_mw, 1.0)
+            # 組合多樣性分數
+            total_diversity = 0.6 * molecular_weight_diversity + 0.4 * llm_diversity_score
             
-            # LLM-DRIVEN structural analysis (no RDKit properties)
-            structural_diversity = self._llm_based_structural_diversity(child_smiles, parent_smiles)
-            
-            # Combine allowed molecular weight with LLM-based analysis
-            diversity_score = 0.15 * mw_diff + 0.05 * structural_diversity
-            
-            return min(diversity_score, 0.2)  # 限制最大獎勵
+            return total_diversity
             
         except Exception as e:
-            logger.debug(f"Error calculating diversity bonus: {e}")
+            logger.warning(f"Diversity calculation failed: {e}")
             return 0.0
     
-    def _llm_based_structural_diversity(self, child_smiles: str, parent_smiles: str) -> float:
+    def _calculate_molecular_weight_diversity(self, target_smiles: str, sibling_smiles: List[str]) -> float:
         """
-        基於 LLM 驅動的結構多樣性分析（無 RDKit 屬性計算）
-        
-        COMPLIANCE NOTE: This method uses only string-based algorithmic analysis
-        and LLM reasoning patterns, with NO cheminformatics tool calculations.
-        
-        Args:
-            child_smiles: 子節點 SMILES
-            parent_smiles: 父節點 SMILES
-            
-        Returns:
-            float: 結構多樣性分數 (0.0 - 1.0)
+        基於分子量計算多樣性（簡單但有效的化學多樣性指標）
         """
         try:
-            if not child_smiles or not parent_smiles:
-                return 0.0
+            # 簡單的分子量估算（基於字符串長度和複雜度）
+            target_weight = len(target_smiles) + target_smiles.count('C') * 2 + target_smiles.count('N') * 3
             
-            # String-based diversity metrics (algorithmic, not RDKit-based)
+            weight_differences = []
+            for sibling in sibling_smiles:
+                sibling_weight = len(sibling) + sibling.count('C') * 2 + sibling.count('N') * 3
+                weight_diff = abs(target_weight - sibling_weight)
+                weight_differences.append(weight_diff)
             
-            # 1. Length difference analysis
-            length_diff = abs(len(child_smiles) - len(parent_smiles))
-            normalized_length_diff = length_diff / max(len(child_smiles), len(parent_smiles), 1)
+            # 平均重量差異，標準化到 [0, 1] 範圍
+            avg_weight_diff = sum(weight_differences) / len(weight_differences) if weight_differences else 0
+            normalized_diversity = min(avg_weight_diff / 50.0, 1.0)  # 50 是經驗標準化常數
             
-            # 2. Character composition analysis (LLM-inspired pattern recognition)
-            child_chars = set(child_smiles)
-            parent_chars = set(parent_smiles)
-            char_jaccard = len(child_chars.intersection(parent_chars)) / len(child_chars.union(parent_chars))
-            char_diversity = 1.0 - char_jaccard
+            return normalized_diversity
             
-            # 3. LLM-inspired pattern analysis (no RDKit)
-            pattern_diversity = self._analyze_smiles_patterns(child_smiles, parent_smiles)
+        except Exception as e:
+            logger.warning(f"Molecular weight diversity calculation failed: {e}")
+            return 0.0
+    
+    def _get_llm_diversity_score(self, target_smiles: str, sibling_smiles: List[str]) -> float:
+        """
+        使用 LLM 分析化學結構多樣性
+        """
+        if not self.llm_gen or not sibling_smiles:
+            return 0.0
+        
+        try:
+            # 限制兄弟節點數量以控制成本
+            max_siblings_to_compare = 3
+            selected_siblings = sibling_smiles[:max_siblings_to_compare]
             
-            # 4. Edit distance based structural difference
-            edit_distance = self._calculate_edit_distance(child_smiles, parent_smiles)
-            max_length = max(len(child_smiles), len(parent_smiles))
-            normalized_edit_distance = edit_distance / max_length if max_length > 0 else 0.0
+            # 構造 LLM 提示
+            prompt = f"""
+            分析以下分子的結構多樣性。請給出目標分子與參考分子群組之間的結構差異度分數 (0-1，1表示完全不同的結構類型)。
             
-            # Combine LLM-driven metrics
-            combined_diversity = (
-                0.3 * normalized_length_diff +
-                0.3 * char_diversity +
-                0.2 * pattern_diversity +
-                0.2 * normalized_edit_distance
+            目標分子: {target_smiles}
+            參考分子群組: {', '.join(selected_siblings)}
+            
+            請僅返回一個 0-1 之間的數字，表示結構多樣性分數。
+            """
+            
+            # 調用 LLM 進行多樣性分析
+            response = self.llm_gen.generate_single(
+                parent_smiles="",  # 不需要父分子
+                action={"type": "diversity_analysis", "prompt": prompt}
             )
             
-            return min(combined_diversity, 1.0)
+            # 提取數字分數
+            diversity_score = self._extract_score_from_response(response)
+            return diversity_score
             
         except Exception as e:
-            logger.debug(f"Error in LLM-based structural diversity: {e}")
+            logger.warning(f"LLM diversity analysis failed: {e}")
             return 0.0
     
-    def _analyze_smiles_patterns(self, smiles1: str, smiles2: str) -> float:
+    def _extract_score_from_response(self, response: str) -> float:
         """
-        LLM-inspired SMILES 模式分析（純字符串算法）
-        
-        COMPLIANCE: Uses only string pattern recognition, no cheminformatics calculations.
+        從 LLM 回應中提取分數
         """
         try:
-            # LLM-inspired recognition of chemical patterns in SMILES strings
+            import re
+            # 尋找 0-1 之間的浮點數
+            score_pattern = r'0?\.\d+|[01]\.?\d*'
+            matches = re.findall(score_pattern, response)
             
-            # Pattern indicators (based on common SMILES syntax)
-            ring_indicators = ['1', '2', '3', '4', '5', '6']
-            branch_indicators = ['(', ')']
-            double_bond_indicators = ['=']
-            triple_bond_indicators = ['#']
-            aromatic_indicators = ['c', 'n', 'o', 's']
-            
-            def count_pattern_occurrences(smiles: str, patterns: list) -> int:
-                return sum(smiles.count(p) for p in patterns)
-            
-            # Count pattern occurrences in both SMILES
-            patterns_to_check = [
-                ring_indicators,
-                branch_indicators,
-                double_bond_indicators,
-                triple_bond_indicators,
-                aromatic_indicators
-            ]
-            
-            pattern_differences = []
-            for patterns in patterns_to_check:
-                count1 = count_pattern_occurrences(smiles1, patterns)
-                count2 = count_pattern_occurrences(smiles2, patterns)
-                
-                max_count = max(count1, count2, 1)
-                diff = abs(count1 - count2) / max_count
-                pattern_differences.append(diff)
-            
-            # Average pattern difference
-            avg_pattern_diff = sum(pattern_differences) / len(pattern_differences)
-            
-            return min(avg_pattern_diff, 1.0)
-            
+            if matches:
+                score = float(matches[0])
+                return max(0.0, min(1.0, score))  # 確保在 [0, 1] 範圍內
+            else:
+                # 回退策略：基於關鍵詞分析
+                if any(word in response.lower() for word in ['similar', '相似', 'same', '相同']):
+                    return 0.1
+                elif any(word in response.lower() for word in ['different', '不同', 'diverse', '多樣']):
+                    return 0.8
+                else:
+                    return 0.5  # 中性分數
+                    
         except Exception as e:
-            logger.debug(f"Error in pattern analysis: {e}")
-            return 0.0
-    
-    def _calculate_edit_distance(self, s1: str, s2: str) -> int:
-        """
-        計算 Levenshtein 編輯距離（純算法實現）
-        
-        COMPLIANCE: String algorithm only, no cheminformatics tools.
-        """
-        try:
-            if len(s1) < len(s2):
-                return self._calculate_edit_distance(s2, s1)
-            
-            if len(s2) == 0:
-                return len(s1)
-            
-            previous_row = list(range(len(s2) + 1))
-            for i, c1 in enumerate(s1):
-                current_row = [i + 1]
-                for j, c2 in enumerate(s2):
-                    insertions = previous_row[j + 1] + 1
-                    deletions = current_row[j] + 1
-                    substitutions = previous_row[j] + (c1 != c2)
-                    current_row.append(min(insertions, deletions, substitutions))
-                previous_row = current_row
-            
-            return previous_row[-1]
-            
-        except Exception as e:
-            logger.debug(f"Error calculating edit distance: {e}")
-            return 0
+            logger.warning(f"Score extraction failed: {e}")
+            return 0.5
     
     def select_path_to_leaf(self, root: Node, max_depth: int = 10) -> Node:
         """

@@ -69,7 +69,7 @@ class LLMGenerator:
     @traceable
     def generate_batch(self, parent_smiles: str, actions: List[Dict], max_retries: int = 3) -> List[str]:
         """
-        根據動作列表生成分子的 SMILES
+        根據動作列表生成分子的 SMILES - 智能重新生成直到獲得足夠的有效分子
         """
         import time
         start_time = time.time()
@@ -79,17 +79,27 @@ class LLMGenerator:
             logger.warning("No actions provided for generation")
             return []
         
-        results = []
+        target_count = len(actions)
+        valid_smiles = []
+        valid_smiles_set = set()
+        total_attempts = 0
+        max_total_attempts = max_retries * 3  # 允許更多嘗試
         
-        for retry in range(max_retries):
-            retry_start = time.time()
-            print(f"[LLM-DEBUG] Retry {retry + 1}/{max_retries} started")
+        while len(valid_smiles) < target_count and total_attempts < max_total_attempts:
+            total_attempts += 1
+            needed_count = target_count - len(valid_smiles)
+            
+            print(f"[LLM-DEBUG] Attempt {total_attempts}: Need {needed_count} more valid SMILES (have {len(valid_smiles)}/{target_count})")
             
             try:
-                # 構建提示
-                print(f"[LLM-DEBUG] Building prompt for {len(actions)} actions")
+                # 動態調整請求數量 - 請求比需要的多一些以提高效率
+                request_count = min(needed_count * 2, len(actions))  # 最多請求原始數量的2倍
+                
+                # 為剩餘的動作構建提示
+                remaining_actions = actions[-request_count:] if total_attempts == 1 else actions[:request_count]
+                
                 action_descriptions = []
-                for i, action in enumerate(actions):
+                for i, action in enumerate(remaining_actions):
                     description = action.get('description', action.get('name', f'action_{i}'))
                     action_descriptions.append(f"{i+1}. {description}")
                 
@@ -97,19 +107,19 @@ class LLMGenerator:
 Parent molecule: {parent_smiles}
 Chemical modifications to apply:
 {chr(10).join(action_descriptions)}
-For each modification, generate a new SMILES that represents the parent molecule after applying that specific chemical change. Return exactly {len(actions)} SMILES, one per line, in the same order as the modifications.
-Requirements:
-- Each SMILES must be chemically valid
-- Modifications should be realistic and chemically feasible
-- Keep molecular weight reasonable (< 800 Da)
-- Avoid overly complex structures
-- SMILES length should be under {self.max_smiles_length} characters
+
+Generate exactly {request_count} new SMILES, one per line. Each SMILES should:
+- Be chemically valid and reasonable
+- Apply the corresponding modification to the parent molecule
+- Have molecular weight < 800 Da
+- Be under {self.max_smiles_length} characters
+- Be structurally diverse
+
 SMILES (one per line):"""
                 
-                print(f"[LLM-DEBUG] Calling {self.provider} API...")
+                print(f"[LLM-DEBUG] Calling {self.provider} API for {request_count} SMILES...")
                 api_start = time.time()
                 
-                # 使用正確的 Cerebras API 調用方式
                 if self.provider == "cerebras":
                     response = self.client.chat.completions.create(
                         model=self.model_name,
@@ -117,138 +127,96 @@ SMILES (one per line):"""
                         temperature=self.temperature,
                         max_completion_tokens=self.max_tokens,
                         top_p=self.top_p,
-                        stream=False  # 為了簡化，先不使用 stream
+                        stream=False
                     )
                     content = response.choices[0].message.content
                 
                 api_time = time.time() - api_start
                 print(f"[LLM-DEBUG] API call completed in {api_time:.2f}s")
                 
-                # 解析生成的 SMILES
-                print(f"[LLM-DEBUG] Parsing generated content...")
-                parse_start = time.time()
+                # 解析和驗證生成的 SMILES
                 lines = [line.strip() for line in content.strip().split('\n') if line.strip()]
-                print(f"[LLM-DEBUG] Found {len(lines)} lines in response")
+                print(f"[LLM-DEBUG] Parsing {len(lines)} lines from response")
                 
-                # 過濾並驗證 SMILES
-                print(f"[LLM-DEBUG] Starting SMILES validation for {len(lines)} lines...")
-                validation_start = time.time()
-                valid_smiles = []
-                
+                new_valid_count = 0
                 for i, line in enumerate(lines):
-                    line_start = time.time()
-                    print(f"[LLM-DEBUG] Processing line {i+1}/{len(lines)}: {line[:50]}...")
-                    
-                    # 移除數字編號和其他前綴
+                    # 清理 SMILES 字符串
                     smiles = re.sub(r'^\d+\.\s*', '', line.strip())
-                    smiles = re.sub(r'^[-*]\s*', '', smiles.strip())  # 移除項目符號
+                    smiles = re.sub(r'^[-*]\s*', '', smiles.strip())
                     smiles = smiles.split()[0] if smiles.split() else ""
                     
-                    if smiles:
-                        print(f"[LLM-DEBUG] Validating SMILES: {smiles}")
-                        validation_result = self.validate_smiles(smiles)
-                        line_time = time.time() - line_start
-                        print(f"[LLM-DEBUG] Line {i+1} validation: {'VALID' if validation_result else 'INVALID'} ({line_time:.3f}s)")
-                        
-                        if validation_result:
+                    if smiles and len(smiles) >= 2:
+                        # 驗證 SMILES
+                        if self.validate_smiles(smiles) and smiles not in valid_smiles_set:
                             valid_smiles.append(smiles)
-                    else:
-                        print(f"[LLM-DEBUG] Line {i+1}: Empty SMILES after cleaning")
+                            valid_smiles_set.add(smiles)
+                            new_valid_count += 1
+                            print(f"[LLM-DEBUG] Added valid SMILES #{len(valid_smiles)}: {smiles}")
+                        else:
+                            print(f"[LLM-DEBUG] Rejected SMILES: {smiles} (invalid or duplicate)")
                 
-                validation_time = time.time() - validation_start
-                print(f"[LLM-DEBUG] Validation completed in {validation_time:.2f}s")
+                print(f"[LLM-DEBUG] Added {new_valid_count} new valid SMILES in this attempt")
                 
-                logger.info(f"Generated {len(valid_smiles)} valid SMILES from {len(lines)} total lines")
-                
-                # 檢查成功率
-                print(f"[LLM-DEBUG] Checking success rate...")
-                success_rate = len(valid_smiles) / len(actions) if actions else 0
-                min_success_rate = 0.5  # 降低最低成功率要求
-                
-                print(f"[LLM-DEBUG] Success rate: {success_rate:.2f} (required: {min_success_rate})")
-                
-                if success_rate >= min_success_rate:
-                    print(f"[LLM-DEBUG] Success rate acceptable, filling remaining slots...")
-                    
-                    # 修正：使用集合來避免重複，並正確控制循環
-                    valid_smiles_set = set(valid_smiles)
-                    fallback_attempts = 0
-                    max_fallback_attempts = 50  # 限制回退嘗試次數
-                    
-                    while len(valid_smiles) < len(actions) and fallback_attempts < max_fallback_attempts:
-                        fallback_start = time.time()
-                        fallback_attempts += 1
-                        print(f"[LLM-DEBUG] Generating fallback SMILES {len(valid_smiles)+1}/{len(actions)} (attempt {fallback_attempts})")
-                        
+                # 如果這次嘗試沒有獲得任何有效分子，嘗試使用回退方法
+                if new_valid_count == 0:
+                    print(f"[LLM-DEBUG] No valid SMILES generated, using fallback methods")
+                    for fallback_attempt in range(min(needed_count, 5)):  # 最多生成5個回退分子
                         fallback_smiles = self.fallback_smiles_generation(parent_smiles)
-                        fallback_time = time.time() - fallback_start
-                        print(f"[LLM-DEBUG] Fallback generated: {fallback_smiles} ({fallback_time:.3f}s)")
-                        
-                        # 檢查是否重複
-                        if fallback_smiles not in valid_smiles_set:
+                        if fallback_smiles and fallback_smiles not in valid_smiles_set:
                             valid_smiles.append(fallback_smiles)
                             valid_smiles_set.add(fallback_smiles)
-                            print(f"[LLM-DEBUG] Added unique fallback SMILES, now have {len(valid_smiles)}/{len(actions)}")
-                        else:
-                            print(f"[LLM-DEBUG] Fallback SMILES is duplicate, skipping")
-                    
-                    # 如果仍然不夠，用簡單的變體填充
-                    if len(valid_smiles) < len(actions):
-                        print(f"[LLM-DEBUG] Still need {len(actions) - len(valid_smiles)} more SMILES, using simple variations")
-                        while len(valid_smiles) < len(actions):
-                            # 使用更簡單的變體生成方法
-                            simple_variation = self.generate_simple_variation(parent_smiles, len(valid_smiles))
-                            if simple_variation not in valid_smiles_set:
-                                valid_smiles.append(simple_variation)
-                                valid_smiles_set.add(simple_variation)
-                            else:
-                                # 如果還是重複，就用索引變體
-                                indexed_smiles = f"{parent_smiles}_{len(valid_smiles)}"[:self.max_smiles_length]
-                                # 簡化為有效的 SMILES
-                                if self.validate_smiles(parent_smiles):
-                                    valid_smiles.append(parent_smiles)
-                                else:
-                                    valid_smiles.append("CCO")  # 最後的最後回退
-                    
-                    results = valid_smiles[:len(actions)]
-                    retry_time = time.time() - retry_start
-                    print(f"[LLM-DEBUG] Retry {retry+1} successful in {retry_time:.2f}s")
-                    logger.info(f"Successfully generated {len(results)} SMILES (success rate: {success_rate:.2f})")
-                    break
-                else:
-                    retry_time = time.time() - retry_start
-                    print(f"[LLM-DEBUG] Retry {retry+1} failed (low success rate) in {retry_time:.2f}s")
-                    logger.warning(f"Low success rate: {success_rate:.2f}, retrying...")
-                    
+                            print(f"[LLM-DEBUG] Added fallback SMILES #{len(valid_smiles)}: {fallback_smiles}")
+                
             except Exception as e:
-                retry_time = time.time() - retry_start
-                print(f"[LLM-DEBUG] Retry {retry+1} failed with exception in {retry_time:.2f}s: {e}")
-                logger.error(f"Error in generate_batch (retry {retry + 1}): {e}")
-                if retry == max_retries - 1:
-                    # 最後一次重試失敗，使用回退方法
-                    print(f"[LLM-DEBUG] All retries failed, using fallback generation for all {len(actions)} actions")
-                    logger.warning("All retries failed, using fallback generation")
-                    results = []
-                    for i in range(len(actions)):
-                        fallback_smiles = self.fallback_smiles_generation(parent_smiles)
-                        if fallback_smiles not in results:  # 避免重複
-                            results.append(fallback_smiles)
-                        else:
-                            results.append(f"CCO_{i}")  # 簡單的唯一回退
+                print(f"[LLM-DEBUG] Error in attempt {total_attempts}: {e}")
+                logger.error(f"Error in generate_batch attempt {total_attempts}: {e}")
+                
+                # 錯誤時也嘗試生成一些回退分子
+                if len(valid_smiles) < target_count:
+                    fallback_smiles = self.fallback_smiles_generation(parent_smiles)
+                    if fallback_smiles and fallback_smiles not in valid_smiles_set:
+                        valid_smiles.append(fallback_smiles)
+                        valid_smiles_set.add(fallback_smiles)
         
-        # 確保返回正確數量的 SMILES
-        if len(results) != len(actions):
-            print(f"[LLM-DEBUG] Mismatch: generated {len(results)} SMILES for {len(actions)} actions")
-            logger.warning(f"Generated fewer SMILES ({len(results)}) than actions ({len(actions)}) after {max_retries} retries")
-            # 補齊不足的部分
-            while len(results) < len(actions):
-                simple_smiles = f"CCO_{len(results)}"  # 用索引保證唯一性
-                results.append(simple_smiles)
+        # 如果仍然不足，使用簡單分子填充
+        if len(valid_smiles) < target_count:
+            print(f"[LLM-DEBUG] Still need {target_count - len(valid_smiles)} more SMILES, using simple molecules")
+            simple_molecules = [
+                "CCO", "CCN", "CCC", "C=C", "c1ccccc1", "CC(C)C", 
+                "CCCC", "CNC", "COC", "C1CCCCC1", "CC=O", "CCO"
+            ]
+            
+            for simple_mol in simple_molecules:
+                if len(valid_smiles) >= target_count:
+                    break
+                if simple_mol not in valid_smiles_set:
+                    valid_smiles.append(simple_mol)
+                    valid_smiles_set.add(simple_mol)
+                    print(f"[LLM-DEBUG] Added simple molecule #{len(valid_smiles)}: {simple_mol}")
+        
+        # 確保返回正確數量（截取或填充）
+        if len(valid_smiles) > target_count:
+            valid_smiles = valid_smiles[:target_count]
+        elif len(valid_smiles) < target_count:
+            # 最後的填充 - 使用父分子的變體
+            while len(valid_smiles) < target_count:
+                variation = self.generate_simple_variation(parent_smiles, len(valid_smiles))
+                if variation not in valid_smiles_set:
+                    valid_smiles.append(variation)
+                    valid_smiles_set.add(variation)
+                else:
+                    valid_smiles.append("CCO")  # 最終保證
         
         total_time = time.time() - start_time
+        success_rate = len(valid_smiles) / target_count if target_count > 0 else 0
+        
         print(f"[LLM-DEBUG] generate_batch completed in {total_time:.2f}s")
-        logger.info(f"Final result: {len(results)} SMILES from {len(actions)} actions")
-        return results
+        print(f"[LLM-DEBUG] Final result: {len(valid_smiles)}/{target_count} SMILES (success rate: {success_rate:.2%})")
+        print(f"[LLM-DEBUG] Total API attempts: {total_attempts}")
+        
+        logger.info(f"Generated {len(valid_smiles)} SMILES from {target_count} actions in {total_attempts} attempts")
+        
+        return valid_smiles
 
     def generate_simple_variation(self, parent_smiles: str, index: int) -> str:
         """

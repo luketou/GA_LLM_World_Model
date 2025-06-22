@@ -171,88 +171,137 @@ def compute_adv(state: AgentState):
     # engine.update_batch moved to update_stores node
     return state
 
-@traceable # Added traceable decorator
-def update_stores(state: AgentState):
-    print(f"[Debug] Updating stores with {len(state.batch_smiles)} molecules")
+@traceable
+def expand_node(state: AgentState):
+    """
+    擴展 MCTS 樹：創建新的子節點結構，不進行分數更新
+    職責：純粹的樹結構擴展
+    """
+    print(f"[Debug] Expanding tree from parent {state.parent_smiles} with {len(state.batch_smiles)} potential children")
     
-    # Update Knowledge Graph and MCTS Engine
-    # Ensure actions, batch_smiles, scores, advantages are all populated and have same length
-    if not all([hasattr(state, attr) and getattr(state, attr) for attr in ['actions', 'batch_smiles', 'scores', 'advantages']]):
-        print("Warning: Skipping KG/MCTS update due to missing state data.")
+    # 確保父節點存在
+    if not engine.has_node(state.parent_smiles):
+        parent_node = engine.get_or_create_node(state.parent_smiles, state.depth)
+        print(f"[Debug] Created missing parent node: {state.parent_smiles}")
+    else:
+        parent_node = engine.get_node(state.parent_smiles)
+    
+    # 創建子節點結構（不更新分數）
+    new_children_count = 0
+    for i, child_smiles in enumerate(state.batch_smiles):
+        if child_smiles not in parent_node.children:
+            # 創建子節點，但不設置分數
+            child_node = engine.get_or_create_node(child_smiles, state.depth + 1)
+            child_node.parent = parent_node
+            
+            # 添加到父節點的子節點字典
+            parent_node.children[child_smiles] = child_node
+            new_children_count += 1
+            
+            # 記錄對應的動作（用於後續分析）
+            if i < len(state.actions):
+                child_node.generating_action = state.actions[i]
+    
+    print(f"[Debug] Expansion complete: {new_children_count} new children added, parent now has {len(parent_node.children)} total children")
+    return state
+
+@traceable
+def update_stores(state: AgentState):
+    """
+    更新存儲：專注於反向傳播和知識圖譜更新
+    職責：分數傳播 + 數據持久化
+    """
+    print(f"[Debug] UpdateStores: Backpropagating scores for {len(state.batch_smiles)} molecules")
+    
+    # 數據完整性檢查
+    if not all([hasattr(state, attr) and getattr(state, attr) for attr in ['batch_smiles', 'scores', 'advantages']]):
+        print("[Warning] Skipping stores update due to missing state data")
         return state
         
-    if not (len(state.actions) == len(state.batch_smiles) == len(state.scores) == len(state.advantages)):
-        print(f"Warning: Inconsistent state data lengths: actions={len(state.actions)}, smiles={len(state.batch_smiles)}, scores={len(state.scores)}, advantages={len(state.advantages)}")
-        # 取最小長度
-        min_len = min(len(state.actions), len(state.batch_smiles), len(state.scores), len(state.advantages))
-        state.actions = state.actions[:min_len]
+    if not (len(state.batch_smiles) == len(state.scores) == len(state.advantages)):
+        print(f"[Warning] Inconsistent data lengths, trimming to minimum")
+        min_len = min(len(state.batch_smiles), len(state.scores), len(state.advantages))
         state.batch_smiles = state.batch_smiles[:min_len]
         state.scores = state.scores[:min_len]
         state.advantages = state.advantages[:min_len]
-        print(f"Trimmed to length: {min_len}")
+        if state.actions:
+            state.actions = state.actions[:min_len]
 
-    # 首先確保父節點存在於 MCTS 樹中
-    if not engine.has_node(state.parent_smiles):
-        engine.get_or_create_node(state.parent_smiles, state.depth)
-        print(f"[Debug] Created parent node: {state.parent_smiles}")
+    parent_node = engine.get_node(state.parent_smiles)
+    if not parent_node:
+        print("[Error] Parent node not found during UpdateStores")
+        return state
 
-    # 創建子節點並更新 MCTS 樹
-    for i in range(len(state.batch_smiles)):
-        child_smiles = state.batch_smiles[i]
-        score = state.scores[i]
-        advantage = state.advantages[i]
-        action_taken = state.actions[i]
-        
-        # 創建子節點
-        child_node = engine.get_or_create_node(child_smiles, state.depth + 1)
-        child_node.parent = engine.get_node(state.parent_smiles)
-        
-        # 將子節點添加到父節點
-        parent_node = engine.get_node(state.parent_smiles)
-        if parent_node and child_smiles not in parent_node.children:
-            parent_node.children[child_smiles] = child_node
-            print(f"[Debug] Added child {child_smiles[:20]}... to parent")
-        
-        # 更新子節點分數
-        child_node.update(score)
-        child_node.advantage = advantage
-        
-        # 更新最佳節點
-        if not engine.best or score > engine.best.avg_score:
-            engine.best = child_node
-            print(f"[Debug] New best: {child_smiles[:30]}... score={score:.4f}")
+    # 1. 更新子節點分數和統計
+    for i, (child_smiles, score, advantage) in enumerate(zip(state.batch_smiles, state.scores, state.advantages)):
+        child_node = parent_node.children.get(child_smiles)
+        if child_node:
+            # 更新節點分數和統計
+            child_node.update(score)
+            child_node.advantage = advantage
+            
+            # 更新全局最佳
+            if not engine.best or score > engine.best.avg_score:
+                engine.best = child_node
+                print(f"[Debug] New best: {child_smiles[:30]}... score={score:.4f}")
 
-        # Log molecule in Knowledge Graph
-        try:
+    # 2. 執行 MCTS 反向傳播
+    engine.backpropagate(state.batch_smiles, state.scores)
+    
+    # 3. 知識圖譜更新
+    try:
+        for i, (child_smiles, score, advantage) in enumerate(zip(state.batch_smiles, state.scores, state.advantages)):
+            # 分子記錄
             kg.create_molecule(
                 smiles=child_smiles,
                 score=score,
                 advantage=advantage,
             )
             
-            # Log action and its result in Knowledge Graph
-            kg.create_action(
-                parent_smiles=state.parent_smiles,
-                child_smiles=child_smiles,
-                action_type=action_taken.get("type", "unknown"),
-                action_params=str(action_taken.get("params", {})),
-                score_delta=score
-            )
-        except Exception as e:
-            print(f"[Debug] KG update error: {e}")
+            # 動作記錄
+            if i < len(state.actions):
+                kg.create_action(
+                    parent_smiles=state.parent_smiles,
+                    child_smiles=child_smiles,
+                    action_type=state.actions[i].get("type", "unknown"),
+                    action_params=str(state.actions[i].get("params", {})),
+                    score_delta=score
+                )
+    except Exception as e:
+        print(f"[Debug] KG update error: {e}")
 
-    # 反向傳播分數
-    engine.backpropagate(state.batch_smiles, state.scores)
-    
-    print(f"[Debug] MCTS update complete: parent has {len(engine.get_node(state.parent_smiles).children)} children")
-    print(f"[Debug] UpdateStores complete, proceeding to Decide")
+    print(f"[Debug] UpdateStores complete: backpropagation finished, KG updated")
     return state
 
-@traceable # Added traceable decorator
+@traceable
 def decide(state: AgentState):
     print(f"[Debug] Decide: current parent={state.parent_smiles}, depth={state.depth}")
     print(f"[Debug] Oracle calls left: {oracle.calls_left}")
     
+    # 動態樹修剪觸發器
+    if not hasattr(engine, 'iteration_count'):
+        engine.iteration_count = 0
+    engine.iteration_count += 1
+    
+    # 每 N 次迭代或樹大小超過閾值時進行修剪
+    prune_interval = cfg.get("mcts", {}).get("prune_interval", 50)  # 每50次迭代修剪一次
+    max_tree_size = cfg.get("mcts", {}).get("max_tree_size", 1000)  # 樹節點數超過1000時修剪
+    
+    should_prune = (
+        engine.iteration_count % prune_interval == 0 or
+        len(engine.nodes) > max_tree_size
+    )
+    
+    if should_prune and hasattr(engine, 'tree_manipulator'):
+        print(f"[Debug] Triggering tree pruning: iteration={engine.iteration_count}, tree_size={len(engine.nodes)}")
+        try:
+            # 保留前 k 個最佳子樹
+            keep_top_k = cfg.get("mcts", {}).get("keep_top_k", 100)
+            pruned_count = engine.tree_manipulator.prune_tree_recursive(engine.root, keep_top_k)
+            print(f"[Debug] Pruning complete: removed {pruned_count} nodes, remaining: {len(engine.nodes)}")
+        except Exception as e:
+            print(f"[Debug] Tree pruning failed: {e}")
+
     # 主要終止條件：Oracle 預算用完
     if oracle.calls_left <= 0:
         print("[Debug] Terminating: Oracle budget exhausted")
@@ -336,45 +385,6 @@ def decide(state: AgentState):
     state.advantages = []
     return state
 
-@traceable
-def expand_node(state: AgentState):
-    """
-    擴展節點：生成子節點
-    """
-    try:
-        parent_smiles = state["parent_smiles"]
-        actions = state["actions"]
-        
-        logger.info(f"Expanding: {parent_smiles} with {len(actions)} actions")
-        
-        # 確保父節點存在
-        if not engine.has_node(parent_smiles):
-            engine.initialize_root(parent_smiles)
-        
-        # 調用 MCTS 擴展
-        batch_smiles = engine.expand(
-            parent_smiles=parent_smiles,
-            actions=actions,
-            batch_size=cfg.get("workflow", {}).get("batch_size", 30)
-        )
-        
-        logger.info(f"Generated {len(batch_smiles)} child molecules")
-        
-        return {
-            **state,
-            "batch_smiles": batch_smiles
-        }
-        
-    except Exception as e:
-        logger.error(f"Error in expand_node: {e}")
-        import traceback
-        logger.error(f"Traceback: {traceback.format_exc()}")
-        return {
-            **state,
-            "batch_smiles": [],
-            "result": {"error": f"Expansion failed: {str(e)}"}
-        }
-
 def should_continue(state: AgentState):
     """
     判斷是否繼續工作流程
@@ -415,16 +425,17 @@ sg.add_node("Generate", generate_actions)
 sg.add_node("LLM", llm_generate)
 sg.add_node("Oracle", oracle_score)  
 sg.add_node("Adv", compute_adv) 
+sg.add_node("Expand", expand_node) 
 sg.add_node("UpdateStores", update_stores) 
 sg.add_node("Decide", decide) 
-sg.add_node("Expand", expand_node) 
 
 sg.set_entry_point("Generate")
 sg.add_edge("Generate", "LLM")
 sg.add_edge("LLM", "Oracle")
 sg.add_edge("Oracle", "Adv")
-sg.add_edge("Adv", "UpdateStores") # Edge to new node
-sg.add_edge("UpdateStores", "Decide") # Edge from new node
+sg.add_edge("Adv", "Expand")        # Adv -> Expand (新增)
+sg.add_edge("Expand", "UpdateStores") # Expand -> UpdateStores (新增)
+sg.add_edge("UpdateStores", "Decide")  # UpdateStores -> Decide (保持)
 sg.add_conditional_edges(
     "Decide", 
     should_continue, 

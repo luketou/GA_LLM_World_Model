@@ -1,212 +1,142 @@
 [
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "methyl",
-            "smiles": "C"
-        }
+      "type": "scaffold_swap",
+      "name": "benzene_to_pyrimidine",
+      "description": "將苯環骨架替換為嘧啶環，提高氮配位能力與水溶性",
+      "params": {
+        "target_scaffold": "pyrimidine",
+        "scaffold_smiles": "c1ncncc1",
+        "example_before": "CCc1ccccc1",
+        "example_after": "CCc1ncncc1"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "ethyl",
-            "smiles": "CC"
-        }
+      "type": "scaffold_swap",
+      "name": "benzene_to_thiophene",
+      "description": "以噻吩環取代苯環，提升π–π 疊合與電子雲密度",
+      "params": {
+        "target_scaffold": "thiophene",
+        "scaffold_smiles": "c1ccsc1",
+        "example_before": "Oc1ccccc1",
+        "example_after": "Oc1ccsc1"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "propyl",
-            "smiles": "CCC"
-        }
+      "type": "functional_group_edit",
+      "name": "reduce_ketone_to_alcohol",
+      "description": "將酮基還原為二級醇，增加氫鍵供受體並提高親水性",
+      "params": {
+        "source_smiles": "C(=O)",
+        "target_smiles": "CO",
+        "example_before": "CC(=O)C",
+        "example_after": "CC(O)C"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "hydroxyl",
-            "smiles": "O"
-        }
+      "type": "functional_group_edit",
+      "name": "phenol_o_methylation",
+      "description": "將酚羥基甲基化成甲氧基，以降低極性並提升代謝穩定性",
+      "params": {
+        "source_smiles": "O",
+        "target_smiles": "OC",
+        "example_before": "c1ccc(cc1)O",
+        "example_after": "c1ccc(cc1)OC"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "amino",
-            "smiles": "N"
-        }
+      "type": "functional_group_edit",
+      "name": "acid_to_methyl_ester",
+      "description": "將羧酸轉酯以改善細胞膜通透性",
+      "params": {
+        "source_smiles": "OC(=O)",
+        "target_smiles": "COC(=O)",
+        "example_before": "OC(=O)CC",
+        "example_after": "COC(=O)CC"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "carboxyl",
-            "smiles": "C(=O)O"
-        }
+      "type": "functional_group_edit",
+      "name": "nitro_reduction_to_amine",
+      "description": "將硝基還原為胺基，提供氫鍵受體並增加鹼性",
+      "params": {
+        "source_smiles": "N(=O)=O",
+        "target_smiles": "N",
+        "example_before": "c1ccc(cc1)[N+](=O)[O-]",
+        "example_after": "c1ccc(cc1)N"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "methoxy",
-            "smiles": "OC"
-        }
+      "type": "side_chain_extension",
+      "name": "methyl_to_ethyl_extension",
+      "description": "將甲基延長為乙基，增加疏水表面並調整立體佔據",
+      "params": {
+        "added_smiles": "C",
+        "example_before": "Cc1ccccc1",
+        "example_after": "CCc1ccccc1"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "fluoro",
-            "smiles": "F"
-        }
+      "type": "functional_group_edit",
+      "name": "add_trifluoromethyl_para",
+      "description": "在芳環對位引入三氟甲基，提高疏水性與代謝穩定度",
+      "params": {
+        "target_smiles": "C(F)(F)F",
+        "example_before": "c1ccccc1",
+        "example_after": "c1ccc(C(F)(F)F)cc1"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "chloro",
-            "smiles": "Cl"
-        }
+      "type": "functional_group_edit",
+      "name": "amide_to_sulfonamide",
+      "description": "將醯胺替換為磺醯胺，提高代謝穩定性並引入額外氫鍵受體",
+      "params": {
+        "source_smiles": "C(=O)N",
+        "target_smiles": "S(=O)(=O)N",
+        "example_before": "CC(=O)N",
+        "example_after": "CCS(=O)(=O)N"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "bromo",
-            "smiles": "Br"
-        }
+      "type": "heteroatom_substitution",
+      "name": "carbonyl_oxygen_to_sulfur",
+      "description": "將醯基氧取代為硫，生成硫酰基以調整電子性與親脂性",
+      "params": {
+        "source_atom": "O",
+        "target_atom": "S",
+        "example_before": "CC(=O)N",
+        "example_after": "CC(=S)N"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "nitro",
-            "smiles": "N(=O)=O"
-        }
+      "type": "heteroatom_substitution",
+      "name": "ether_to_secondary_amine",
+      "description": "將醚氧替換為二級胺，增加鹼性與可離子化性",
+      "params": {
+        "source_smiles": "COC",
+        "target_smiles": "CNC",
+        "example_before": "COC",
+        "example_after": "CNC"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "cyano",
-            "smiles": "C#N"
-        }
+      "type": "ring_fusion",
+      "name": "pyridine_to_quinoline_fusion",
+      "description": "將單環嘧啶融合成雙環喹啉，增加平面性與芳香表面",
+      "params": {
+        "fusion_product_smiles": "c1ccnc2ccccc12",
+        "example_before": "c1ccncc1",
+        "example_after": "c1ccnc2ccccc12"
+      }
     },
     {
-        "type": "substitute",
-        "params": {
-            "fragment": "phenyl",
-            "smiles": "c1ccccc1"
-        }
-    },
-    {
-        "type": "substitute",
-        "params": {
-            "fragment": "benzyl",
-            "smiles": "Cc1ccccc1"
-        }
-    },
-    {
-        "type": "substitute",
-        "params": {
-            "fragment": "trifluoromethyl",
-            "smiles": "C(F)(F)F"
-        }
-    },
-    {
-        "type": "substitute",
-        "params": {
-            "fragment": "acetyl",
-            "smiles": "C(=O)C"
-        }
-    },
-    {
-        "type": "substitute",
-        "params": {
-            "fragment": "sulfonyl",
-            "smiles": "S(=O)(=O)"
-        }
-    },
-    {
-        "type": "substitute",
-        "params": {
-            "fragment": "pyridyl",
-            "smiles": "c1ccncc1"
-        }
-    },
-    {
-        "type": "substitute",
-        "params": {
-            "fragment": "thiophene",
-            "smiles": "c1ccsc1"
-        }
-    },
-    {
-        "type": "substitute",
-        "params": {
-            "fragment": "furan",
-            "smiles": "c1ccoc1"
-        }
-    },
-    {
-        "type": "add_ring",
-        "params": {
-            "ring_type": "cyclopropyl",
-            "smiles": "C1CC1"
-        }
-    },
-    {
-        "type": "add_ring",
-        "params": {
-            "ring_type": "cyclobutyl",
-            "smiles": "C1CCC1"
-        }
-    },
-    {
-        "type": "add_ring",
-        "params": {
-            "ring_type": "cyclopentyl",
-            "smiles": "C1CCCC1"
-        }
-    },
-    {
-        "type": "add_ring",
-        "params": {
-            "ring_type": "cyclohexyl",
-            "smiles": "C1CCCCC1"
-        }
-    },
-    {
-        "type": "add_ring",
-        "params": {
-            "ring_type": "pyrrolidine",
-            "smiles": "C1CCNC1"
-        }
-    },
-    {
-        "type": "add_ring",
-        "params": {
-            "ring_type": "piperidine",
-            "smiles": "C1CCNCC1"
-        }
-    },
-    {
-        "type": "add_ring",
-        "params": {
-            "ring_type": "morpholine",
-            "smiles": "C1COCCN1"
-        }
-    },
-    {
-        "type": "add_ring",
-        "params": {
-            "ring_type": "imidazole",
-            "smiles": "c1c[nH]cn1"
-        }
-    },
-    {
-        "type": "add_ring",
-        "params": {
-            "ring_type": "oxazole",
-            "smiles": "c1ccon1"
-        }
-    },
-    {
-        "type": "add_ring",
-        "params": {
-            "ring_type": "thiazole",
-            "smiles": "c1ccsn1"
-        }
+      "type": "ring_contraction",
+      "name": "cyclohexane_to_cyclopentane",
+      "description": "將六元碳環收縮為五元環，以減少柔性並調整體積",
+      "params": {
+        "source_smiles": "C1CCCCC1",
+        "target_smiles": "C1CCCC1",
+        "example_before": "C1CCCCC1",
+        "example_after": "C1CCCC1"
+      }
     }
-]
+  ]
