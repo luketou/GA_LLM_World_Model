@@ -465,7 +465,7 @@ def get_fallback_actions(k: int) -> List[Dict[str, Any]]:
 
 def propose_mixed_actions(parent_smiles: str, depth: int, k_init: int) -> List[Dict[str, Any]]:
     """
-    混合粗粒度和細粒度動作 - 修復版本
+    混合粗粒度和細粒度動作 - 修復版本，確保動作多樣性
     
     COMPLIANCE NOTE: Uses only string-based molecular analysis,
     no RDKit property calculations before Oracle evaluation.
@@ -477,11 +477,11 @@ def propose_mixed_actions(parent_smiles: str, depth: int, k_init: int) -> List[D
     try:
         # 根據深度調整粗粒度和細粒度的比例
         if depth == 0:
-            coarse_ratio = 0.7
+            coarse_ratio = 0.8  # 增加粗粒度比例以獲得更多多樣性
         elif depth <= 2:
-            coarse_ratio = 0.5
+            coarse_ratio = 0.6
         else:
-            coarse_ratio = 0.3
+            coarse_ratio = 0.4
         
         coarse_k = int(k_init * coarse_ratio)
         fine_k = k_init - coarse_k
@@ -504,7 +504,7 @@ def propose_mixed_actions(parent_smiles: str, depth: int, k_init: int) -> List[D
         # 獲取細粒度動作 - 使用安全的方法
         if fine_k > 0:
             try:
-                unlock_factor = min(1.0, 0.3 + depth * 0.1)
+                unlock_factor = min(1.0, 0.5 + depth * 0.1)  # 增加解鎖因子
                 
                 # 使用更安全的動作生成方法
                 fine_actions_list = generate_safe_fine_actions(
@@ -528,7 +528,20 @@ def propose_mixed_actions(parent_smiles: str, depth: int, k_init: int) -> List[D
             actions = get_fallback_actions(k_init)
             logger.warning(f"No actions generated, using {len(actions)} fallback actions")
         
-        logger.info(f"Mixed actions: {len(actions)} total")
+        # 新增：確保動作多樣性，移除重複動作
+        unique_actions = []
+        seen_names = set()
+        for action in actions:
+            action_key = action.get('name', str(action))
+            if action_key not in seen_names:
+                unique_actions.append(action)
+                seen_names.add(action_key)
+        
+        if len(unique_actions) < len(actions):
+            logger.info(f"Removed {len(actions) - len(unique_actions)} duplicate actions")
+            actions = unique_actions
+        
+        logger.info(f"Mixed actions: {len(actions)} total (unique)")
         return actions
         
     except Exception as e:

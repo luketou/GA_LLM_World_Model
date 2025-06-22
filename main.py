@@ -56,7 +56,7 @@ def init_langsmith():
 # 初始化 LangSmith
 init_langsmith()
 
-from graph.workflow_graph import graph_app, AgentState, oracle, cfg
+from graph.workflow_graph import graph_app, AgentState, oracle, cfg, engine
 
 # 設置日誌
 logging.basicConfig(
@@ -114,9 +114,14 @@ async def run():
     best_result_node = None
     
     try:
-        # 使用新的異步運行函數
-        from graph.workflow_graph import run_workflow
-        workflow_output = await run_workflow(init_state)
+        # 添加超時機制
+        async def run_with_timeout():
+            # 使用新的異步運行函數
+            from graph.workflow_graph import run_workflow
+            return await run_workflow(init_state)
+        
+        # 設置 30 分鐘超時
+        workflow_output = await asyncio.wait_for(run_with_timeout(), timeout=1800)
         
         if workflow_output and isinstance(workflow_output, dict):
             # 從結果中提取最終狀態和結果
@@ -165,12 +170,37 @@ async def run():
         else:
             logger.warning("[Workflow] No result returned")
         
+    except asyncio.TimeoutError:
+        logger.error("[Workflow] Timeout: Workflow took too long (30 minutes)")
+        # 嘗試獲取當前最佳結果
+        try:
+            best_result_node = engine.best if hasattr(engine, 'best') and engine.best else None
+            if best_result_node:
+                logger.info(f"[Workflow] Using best result from timeout: {best_result_node.smiles}")
+        except Exception as e:
+            logger.warning(f"Could not retrieve best result from engine: {e}")
+            
     except KeyboardInterrupt:
         logger.info("[Workflow] Interrupted by user")
+        # 嘗試獲取當前最佳結果
+        try:
+            best_result_node = engine.best if hasattr(engine, 'best') and engine.best else None
+            if best_result_node:
+                logger.info(f"[Workflow] Using best result from interruption: {best_result_node.smiles}")
+        except Exception as e:
+            logger.warning(f"Could not retrieve best result from engine: {e}")
+            
     except Exception as e:
         logger.error(f"[Workflow] Error: {e}")
         import traceback
         logger.error(traceback.format_exc())
+        # 嘗試獲取當前最佳結果
+        try:
+            best_result_node = engine.best if hasattr(engine, 'best') and engine.best else None
+            if best_result_node:
+                logger.info(f"[Workflow] Using best result from error: {best_result_node.smiles}")
+        except Exception as e2:
+            logger.warning(f"Could not retrieve best result from engine: {e2}")
         
     # 4. 輸出最終結果
     if best_result_node and hasattr(best_result_node, 'smiles'):

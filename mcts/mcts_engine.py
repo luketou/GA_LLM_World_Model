@@ -271,34 +271,55 @@ class MCTSEngine:
             return []
     
     def select_child(self, parent_smiles: str) -> Optional[Node]:
-        """選擇子節點 - 使用 UCTSelector 或搜索策略"""
+        """選擇子節點 - 使用 UCTSelector 或搜索策略，避免選擇相同分子"""
         parent_node = self.nodes.get(parent_smiles)
         if not parent_node:
             logger.debug(f"Parent node {parent_smiles} not found")
             return None
-        
+
         if not parent_node.children:
             logger.debug(f"No children available for {parent_smiles}")
             return None
+
+        # 過濾掉與父節點相同的子節點
+        valid_children = {smiles: child for smiles, child in parent_node.children.items() 
+                         if smiles != parent_smiles}
         
-        # 使用 UCTSelector 進行選擇（如果可用）
-        if self.uct_selector:
-            selected_child = self.uct_selector.select_best_child(parent_node)
-            if selected_child:
-                logger.debug(f"UCT selected child: {selected_child.smiles}")
-                return selected_child
-        
-        # 後備策略：使用 SearchStrategies 模組
-        if SearchStrategies:
-            selected_child = SearchStrategies.select_best_child_by_score(parent_node)
-            if selected_child:
-                logger.debug(f"Score-based selected child: {selected_child.smiles}")
-                return selected_child
-        
-        # 最終後備：簡單隨機選擇
-        import random
-        child_smiles = random.choice(list(parent_node.children.keys()))
-        return parent_node.children[child_smiles]
+        if not valid_children:
+            logger.warning(f"All children are identical to parent for {parent_smiles}")
+            # 如果所有子節點都相同，隨機選擇一個並警告
+            child_smiles = next(iter(parent_node.children.keys()))
+            return parent_node.children[child_smiles]
+
+        # 臨時替換 children 進行選擇
+        original_children = parent_node.children
+        parent_node.children = valid_children
+
+        try:
+            # 使用 UCTSelector 進行選擇（如果可用）
+            if self.uct_selector:
+                selected_child = self.uct_selector.select_best_child(parent_node)
+                if selected_child:
+                    logger.debug(f"UCT selected child: {selected_child.smiles[:50]}...")
+                    return selected_child
+
+            # 後備策略：使用 SearchStrategies 模組
+            if SearchStrategies:
+                selected_child = SearchStrategies.select_best_child_by_score(parent_node)
+                if selected_child:
+                    logger.debug(f"Score-based selected child: {selected_child.smiles[:50]}...")
+                    return selected_child
+
+            # 最終後備：隨機選擇不同的子節點
+            import random
+            child_smiles = random.choice(list(valid_children.keys()))
+            selected_child = valid_children[child_smiles]
+            logger.debug(f"Random selected child: {selected_child.smiles[:50]}...")
+            return selected_child
+            
+        finally:
+            # 恢復原始 children
+            parent_node.children = original_children
     
     def update_batch(self, parent_smiles: str, batch_smiles: List[str], 
                     scores: List[float], advantages: List[float]):

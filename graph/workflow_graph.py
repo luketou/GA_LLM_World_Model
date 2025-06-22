@@ -7,6 +7,7 @@ from langsmith import traceable
 from dataclasses import dataclass, field
 from typing import List, Dict, Any
 import logging
+import asyncio
 
 from configparser import ConfigParser
 import yaml, pathlib, os, re
@@ -118,6 +119,7 @@ async def oracle_score(state: AgentState):
     if not state.batch_smiles:
         logger.warning("No SMILES to score")
         state.scores = []
+        print(f"[Debug] No SMILES to score, continuing with empty scores")
         return state
     
     # 過濾掉過長的 SMILES
@@ -134,6 +136,7 @@ async def oracle_score(state: AgentState):
     if not filtered_smiles:
         logger.warning("All SMILES were filtered out due to length constraints")
         state.scores = []
+        print(f"[Debug] All SMILES filtered out, continuing with empty scores")
         return state
     
     # 如果有SMILES被過濾掉，需要調整相關列表
@@ -148,24 +151,30 @@ async def oracle_score(state: AgentState):
         scores = await oracle.score_async(filtered_smiles)
         state.scores = scores
         print(f"[Debug] Oracle returned scores: {scores}")
+        print(f"[Debug] Oracle calls remaining: {oracle.calls_left}")
     except Exception as e:
         logger.error(f"Oracle scoring failed: {e}")
         # 提供默認分數以避免工作流停止
         state.scores = [0.0] * len(filtered_smiles)
         print(f"[Debug] Using default scores: {state.scores}")
     
+    print(f"[Debug] Oracle scoring complete, proceeding to next node")
     return state
 
 @traceable
 def compute_adv(state: AgentState):
+    print(f"[Debug] Computing advantages for {len(state.scores)} scores")
     import numpy as np
     baseline = float(np.mean(state.scores)) if state.scores else 0.0
     state.advantages = [s-baseline for s in state.scores]
+    print(f"[Debug] Baseline: {baseline:.6f}, advantages computed")
     # engine.update_batch moved to update_stores node
     return state
 
 @traceable # Added traceable decorator
 def update_stores(state: AgentState):
+    print(f"[Debug] Updating stores with {len(state.batch_smiles)} molecules")
+    
     # Update Knowledge Graph and MCTS Engine
     # Ensure actions, batch_smiles, scores, advantages are all populated and have same length
     if not all([hasattr(state, attr) and getattr(state, attr) for attr in ['actions', 'batch_smiles', 'scores', 'advantages']]):
@@ -236,6 +245,7 @@ def update_stores(state: AgentState):
     engine.backpropagate(state.batch_smiles, state.scores)
     
     print(f"[Debug] MCTS update complete: parent has {len(engine.get_node(state.parent_smiles).children)} children")
+    print(f"[Debug] UpdateStores complete, proceeding to Decide")
     return state
 
 @traceable # Added traceable decorator
@@ -271,12 +281,26 @@ def decide(state: AgentState):
         state.result = {"best": engine.best, "reason": f"Molecule too complex (length: {len(state.parent_smiles)})"}
         return state
     
-    # 移除硬編碼的迭代限制，讓程式持續運行直到 Oracle 預算用完
-    # 只保留基本的迭代計數用於調試
+    # 新增：檢查是否所有子節點都相同（LLM 生成失敗）
+    parent_node = engine.get_node(state.parent_smiles)
+    if parent_node and parent_node.children:
+        unique_children = set(parent_node.children.keys())
+        if len(unique_children) == 1 and state.parent_smiles in unique_children:
+            print("[Debug] Terminating: LLM failed to generate diverse molecules")
+            state.result = {"best": engine.best, "reason": "LLM generation failure - all molecules identical"}
+            return state
+    
+    # 新增：迭代限制作為安全網
     if hasattr(engine, 'iteration_count'):
         engine.iteration_count += 1
     else:
         engine.iteration_count = 1
+    
+    # 安全網：防止無限循環
+    if engine.iteration_count > 100:
+        print(f"[Debug] Terminating: Too many iterations ({engine.iteration_count})")
+        state.result = {"best": engine.best, "reason": f"Maximum iterations reached ({engine.iteration_count})"}
+        return state
     
     # 嘗試選擇下一個節點
     nxt = engine.select_child(state.parent_smiles)
@@ -291,10 +315,20 @@ def decide(state: AgentState):
         state.result = {"best": engine.best, "reason": "Next node would exceed max depth"}
         return state
     
-    # 更新狀態繼續探索
-    print(f"[Debug] Continuing: next parent={nxt.smiles}, next depth={nxt.depth}")
-    state.parent_smiles = nxt.smiles
-    state.depth = nxt.depth
+    # 檢查是否選擇了相同的節點（避免死循環）
+    if nxt.smiles == state.parent_smiles:
+        print("[Debug] Warning: Selected same molecule, incrementing depth")
+        state.depth += 1
+        if state.depth >= cfg["max_depth"]:
+            print("[Debug] Terminating: Forced depth increment exceeded max depth")
+            state.result = {"best": engine.best, "reason": "Forced termination due to identical molecule selection"}
+            return state
+    else:
+        # 更新狀態繼續探索
+        print(f"[Debug] Continuing: next parent={nxt.smiles[:50]}..., next depth={nxt.depth}")
+        state.parent_smiles = nxt.smiles
+        state.depth = nxt.depth
+    
     # 清空之前的批次數據
     state.actions = []
     state.batch_smiles = []
@@ -346,8 +380,11 @@ def should_continue(state: AgentState):
     判斷是否繼續工作流程
     """
     try:
+        print(f"[Debug] should_continue called, checking state...")
+        
         # 檢查是否有結果（終止條件）
         if hasattr(state, 'result') and state.result:
+            print(f"[Debug] Found result: {state.result}")
             logger.info("Workflow completed with result")
             return "end"
         
@@ -358,15 +395,18 @@ def should_continue(state: AgentState):
         
         # 檢查 Oracle 調用次數
         if oracle.calls_left <= 0:
+            print(f"[Debug] Oracle calls exhausted: {oracle.calls_left}")
             logger.info("Oracle calls exhausted")
             return "end"
         
         # 正常流程：繼續生成
+        print(f"[Debug] Continuing workflow to Generate node")
         logger.debug("Continuing workflow to Generate node")
         return "Generate"
         
     except Exception as e:
         logger.error(f"Error in should_continue: {e}")
+        print(f"[Debug] Error in should_continue: {e}")
         return "end"
 
 # ---------- LangGraph ----------
@@ -426,20 +466,27 @@ async def run_workflow(initial_state):
                 logger.warning(f"Reached maximum iterations ({max_iterations}), stopping workflow")
                 break
                 
-            print(f"[Debug] Iteration {iteration}: {chunk}")
-            last_chunk = chunk
+            print(f"[Debug] Iteration {iteration}: {list(chunk.keys())}")
             
-            # 檢查是否有終止結果
+            # 檢查每個節點的狀態
             for node_name, state in chunk.items():
+                print(f"[Debug] Node {node_name} completed")
+                
+                # 檢查是否有終止結果
                 if hasattr(state, 'result') and state.result:
                     print(f"[Debug] Found termination result in {node_name}: {state.result}")
                     final_result = state.result
                     return chunk  # 立即返回包含結果的 chunk
             
+            last_chunk = chunk
+            
             # 檢查是否到達 END 狀態
             if END in chunk:
                 print(f"[Debug] Reached END state")
                 return chunk
+            
+            # 添加小延遲以確保異步操作完成
+            await asyncio.sleep(0.1)
                 
         # 工作流程結束，檢查結束原因
         if oracle.calls_left <= 0:
@@ -474,4 +521,10 @@ async def run_workflow(initial_state):
         return last_chunk
     except Exception as e:
         logger.error(f"Workflow failed at iteration {iteration}: {e}")
+        print(f"[Debug] Workflow exception: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return None
+
+# 確保 engine 可以被外部導入
+__all__ = ['graph_app', 'AgentState', 'oracle', 'cfg', 'engine', 'run_workflow']

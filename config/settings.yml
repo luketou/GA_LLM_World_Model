@@ -33,7 +33,7 @@ llm:
   max_completion_tokens: 8192
   top_p: 1
   stream: true
-  api_key: csk-8f3ct6y23mw2fw3fdmyx8t4tx8rw8p85tdx9nrm8mv2t9m26
+  api_key: csk-r45fve4re56cxcmmvj8j4f5c5hrvt893deyk9p9pwre36t38
 
 # LangSmith 設定
 langsmith:

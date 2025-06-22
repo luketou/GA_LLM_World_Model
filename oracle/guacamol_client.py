@@ -192,6 +192,10 @@ class GuacaMolOracle:
         - 呼叫 benchmark 評分方法
         - 每個分子評分後立即寫入 score_log.csv（欄位：epoch, smiles, score）
         """
+        import time
+        start_time = time.time()
+        print(f"[ORACLE-DEBUG] Starting score_async for {len(smiles)} SMILES")
+        
         if self.calls_left <= 0:
             raise RuntimeError("Oracle call limit exhausted (500).")
         
@@ -199,46 +203,70 @@ class GuacaMolOracle:
         if len(smiles) > self.calls_left:
             raise RuntimeError(f"Not enough oracle calls remaining. Need {len(smiles)}, have {self.calls_left}")
         
+        print(f"[ORACLE-DEBUG] Checking rate limiter...")
+        rate_start = time.time()
         if not self.rate_limiter.acquire():
+            print(f"[ORACLE-DEBUG] Rate limit hit, waiting {self.rate_limiter.interval}s...")
             # 若令牌不足，非同步 sleep
             await asyncio.sleep(self.rate_limiter.interval)
             if not self.rate_limiter.acquire():
                 raise RuntimeError("Rate limit exceeded")
-
+        rate_time = time.time() - rate_start
+        print(f"[ORACLE-DEBUG] Rate limiter check completed in {rate_time:.3f}s")
+        
         # 更新調用次數和 epoch（每批次調用算一次）
         self.calls_left -= len(smiles)  # 每個分子都要消耗配額
         self.epoch += 1
         current_epoch = epoch if epoch is not None else self.epoch
         
+        print(f"[ORACLE-DEBUG] Oracle calls remaining: {self.calls_left}")
+        print(f"[ORACLE-DEBUG] Current epoch: {current_epoch}")
+        
         loop = asyncio.get_event_loop()
         
         # 定義評分函數，每個分子評分後立即記錄
         def score_and_log_molecule(smile_str):
+            mol_start = time.time()
+            print(f"[ORACLE-DEBUG] Scoring molecule: {smile_str[:50]}...")
+            
             try:
                 # 嘗試使用 objective 屬性進行單一評分
                 if hasattr(self.benchmark, 'objective') and hasattr(self.benchmark.objective, 'score'):
                     try:
+                        score_start = time.time()
                         score = self.benchmark.objective.score(smile_str)
+                        score_time = time.time() - score_start
+                        print(f"[ORACLE-DEBUG] Objective.score completed in {score_time:.3f}s, score: {score:.6f}")
                     except Exception as e:
-                        print(f"[Oracle] Error scoring {smile_str}: {e}")
+                        print(f"[ORACLE-DEBUG] Error in objective.score for {smile_str}: {e}")
                         score = 0.0
                 elif hasattr(self.benchmark, 'score'):
                     # 使用單一評分方法
+                    score_start = time.time()
                     score = self.benchmark.score(smile_str)
+                    score_time = time.time() - score_start
+                    print(f"[ORACLE-DEBUG] Benchmark.score completed in {score_time:.3f}s, score: {score:.6f}")
                 else:
                     # 最後回退：返回默認分數
-                    print(f"[Oracle] No suitable scoring method found, using default score")
+                    print(f"[ORACLE-DEBUG] No suitable scoring method found, using default score")
                     score = 0.0
                 
                 # 立即記錄到 CSV
+                csv_start = time.time()
                 with self.CSV_PATH.open("a", newline="") as f:
                     csv.writer(f).writerow([current_epoch, smile_str, score])
+                csv_time = time.time() - csv_start
+                print(f"[ORACLE-DEBUG] CSV logging completed in {csv_time:.3f}s")
+                
+                mol_time = time.time() - mol_start
+                print(f"[ORACLE-DEBUG] Molecule scoring total time: {mol_time:.3f}s")
                 
                 return score
             except Exception as e:
-                print(f"[Oracle] Scoring error for {smile_str}: {e}")
-                print(f"[Oracle] Benchmark type: {type(self.benchmark)}")
-                print(f"[Oracle] Available methods: {[attr for attr in dir(self.benchmark) if not attr.startswith('_')]}")
+                mol_time = time.time() - mol_start
+                print(f"[ORACLE-DEBUG] Scoring error for {smile_str} after {mol_time:.3f}s: {e}")
+                print(f"[ORACLE-DEBUG] Benchmark type: {type(self.benchmark)}")
+                print(f"[ORACLE-DEBUG] Available methods: {[attr for attr in dir(self.benchmark) if not attr.startswith('_')]}")
                 # 返回默認分數並記錄
                 score = 0.0
                 with self.CSV_PATH.open("a", newline="") as f:
@@ -246,15 +274,27 @@ class GuacaMolOracle:
                 return score
         
         # 對每個 SMILES 逐一評分和記錄
+        print(f"[ORACLE-DEBUG] Starting individual molecule scoring...")
         scores = []
-        for smile_str in smiles:
+        for i, smile_str in enumerate(smiles):
+            print(f"[ORACLE-DEBUG] Processing molecule {i+1}/{len(smiles)}")
+            exec_start = time.time()
+            
             score = await loop.run_in_executor(
                 self.executor,
                 score_and_log_molecule,
                 smile_str
             )
+            
+            exec_time = time.time() - exec_start
+            print(f"[ORACLE-DEBUG] Executor call {i+1} completed in {exec_time:.3f}s")
+            
             scores.append(score)
-
+        
+        total_time = time.time() - start_time
+        print(f"[ORACLE-DEBUG] score_async completed in {total_time:.2f}s for {len(smiles)} molecules")
+        print(f"[ORACLE-DEBUG] Average time per molecule: {total_time/len(smiles):.3f}s")
+        
         return scores
 
     def close(self):
