@@ -1,7 +1,7 @@
 """
 LLM Generator
 LLM 客戶端封裝：
-- 初始化 Cerebras 客戶端
+- 初始化 GitHub 或 Cerebras 客戶端
 - 批次生成介面
 - 組裝 system + action messages
 - 呼叫 LLM
@@ -17,13 +17,14 @@ import re
 from typing import List, Dict, Any, Optional
 from langsmith import traceable
 from .cerebras_client import CerebrasClient
+from .github_client import GitHubClient
 from .prompt import create_llm_messages
 
 logger = logging.getLogger(__name__)
 
 
 class LLMGenerator:
-    """LLM 客戶端封裝 - 使用 Cerebras"""
+    """LLM 客戶端封裝 - 支援 GitHub 和 Cerebras"""
     
     def __init__(self, 
                  provider: str = "cerebras", 
@@ -38,7 +39,7 @@ class LLMGenerator:
         初始化 LLM Generator
         
         Args:
-            provider: LLM 提供商
+            provider: LLM 提供商 ("github" 或 "cerebras")
             model_name: 模型名稱
             temperature: 溫度參數
             max_completion_tokens: 最大完成 token 數
@@ -55,7 +56,21 @@ class LLMGenerator:
         self.top_p = top_p
         self.stream = stream
         
-        if provider == "cerebras":
+        if provider == "github":
+            # 使用傳入的 api_key 或環境變數
+            api_key = api_key or os.getenv("GITHUB_TOKEN")
+            if not api_key:
+                raise ValueError("GITHUB_TOKEN is required")
+            
+            self.client = GitHubClient(
+                model_name=model_name,
+                temperature=temperature,
+                max_completion_tokens=max_completion_tokens,
+                top_p=top_p,
+                stream=stream,
+                api_key=api_key
+            )
+        elif provider == "cerebras":
             from cerebras.cloud.sdk import Cerebras
             # 使用傳入的 api_key 或環境變數
             api_key = api_key or os.getenv("CEREBRAS_API_KEY")
@@ -120,7 +135,10 @@ SMILES (one per line):"""
                 print(f"[LLM-DEBUG] Calling {self.provider} API for {request_count} SMILES...")
                 api_start = time.time()
                 
-                if self.provider == "cerebras":
+                if self.provider == "github":
+                    response = self.client.generate([{"role": "user", "content": prompt}])
+                    content = response
+                elif self.provider == "cerebras":
                     response = self.client.chat.completions.create(
                         model=self.model_name,
                         messages=[{"role": "user", "content": prompt}],

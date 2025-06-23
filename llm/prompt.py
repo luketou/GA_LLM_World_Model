@@ -6,7 +6,7 @@ LLM Prompt Templates
 from textwrap import dedent
 from typing import List, Dict, Any
 
-
+# TODO: double check generator prompt templates it is trouble 
 # 系統提示模板
 SYS_TEMPLATE = dedent("""\
 You are an expert medicinal chemist with deep knowledge of molecular design and SMILES notation.

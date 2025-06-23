@@ -106,13 +106,24 @@ class MCTSEngine:
                 self.progressive_widening = ProgressiveWidening()
             else:
                 self.progressive_widening = None
+                
+            # 初始化 LLM-guided action selector
+            try:
+                from mcts.llm_guided_selector import create_llm_guided_selector
+                self.llm_guided_selector = create_llm_guided_selector(llm_gen)
+                logger.info("LLM-guided action selector initialized")
+            except ImportError as e:
+                logger.warning(f"LLM-guided selector not available: {e}")
+                self.llm_guided_selector = None
         except Exception as e:
             logger.warning(f"Error initializing strategy components: {e}")
             self.uct_selector = None
             self.progressive_widening = None
+            self.llm_guided_selector = None
         
         logger.info(f"MCTSEngine initialized with max_depth={max_depth}, c_uct={c_uct}")
         logger.info(f"Actions modules available: {ACTIONS_AVAILABLE}")
+        logger.info(f"LLM-guided selector available: {self.llm_guided_selector is not None}")
     
     def initialize_root(self, root_smiles: str):
         """初始化根節點"""
@@ -142,7 +153,7 @@ class MCTSEngine:
     
     def propose_actions(self, parent_smiles: str, depth: int, k_init: int) -> List[Dict[str, Any]]:
         """
-        提議動作列表 - 使用外部 actions 模組
+        提議動作列表 - 使用 LLM-guided 軌跡感知選擇或外部 actions 模組
         
         COMPLIANCE NOTE: This method delegates to external actions modules
         which maintain strict compliance with Oracle evaluation constraints.
@@ -162,7 +173,22 @@ class MCTSEngine:
             if parent_smiles not in self.nodes:
                 self.get_or_create_node(parent_smiles, depth)
             
-            # 使用外部 actions 模組
+            # 獲取當前節點
+            current_node = self.nodes[parent_smiles]
+            
+            # 嘗試使用 LLM-guided trajectory-aware action selection
+            if self.llm_guided_selector and depth > 0:  # 只在非根節點使用
+                try:
+                    selected_actions = self._propose_actions_llm_guided(current_node, k_init)
+                    if selected_actions:
+                        logger.info(f"LLM-guided selector generated {len(selected_actions)} trajectory-aware actions")
+                        return selected_actions
+                    else:
+                        logger.warning("LLM-guided selector returned no actions, falling back to mixed actions")
+                except Exception as e:
+                    logger.warning(f"LLM-guided action selection failed: {e}, falling back to mixed actions")
+            
+            # 回退到原有的混合動作選擇
             if ACTIONS_AVAILABLE and fine_actions:
                 # 使用 propose_mixed_actions 函數
                 actions = fine_actions.propose_mixed_actions(
@@ -183,6 +209,74 @@ class MCTSEngine:
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")
             return self._get_fallback_actions(parent_smiles, depth, k_init)
+    
+    def _propose_actions_llm_guided(self, current_node: Node, k_init: int) -> List[Dict[str, Any]]:
+        """
+        使用 LLM-guided selector 進行軌跡感知的動作選擇
+        
+        Args:
+            current_node: 當前節點
+            k_init: 需要的動作數量
+            
+        Returns:
+            List[Dict[str, Any]]: 選擇的動作列表
+        """
+        try:
+            # 1. 獲取所有可用動作（使用現有的動作生成機制）
+            available_actions = []
+            
+            if ACTIONS_AVAILABLE and fine_actions:
+                # 獲取混合動作作為候選池
+                available_actions = fine_actions.propose_mixed_actions(
+                    parent_smiles=current_node.smiles,
+                    depth=current_node.depth,
+                    k_init=k_init * 3  # 獲取更多候選動作供LLM選擇
+                )
+            
+            if not available_actions:
+                logger.warning("No available actions for LLM-guided selection")
+                return []
+            
+            # 2. 獲取節點的軌跡摘要
+            trajectory_summary = current_node.get_action_trajectory_summary()
+            
+            # 3. 確定優化目標（從配置或默認值）
+            optimization_goal = self._get_optimization_goal()
+            
+            # 4. 創建 LLM 選擇請求
+            from mcts.llm_guided_selector import ActionSelectionRequest
+            
+            selection_request = ActionSelectionRequest(
+                parent_smiles=current_node.smiles,
+                current_node_trajectory=trajectory_summary,
+                available_actions=available_actions,
+                optimization_goal=optimization_goal,
+                depth=current_node.depth,
+                max_selections=min(k_init, len(available_actions))
+            )
+            
+            # 5. 使用 LLM-guided selector 進行選擇
+            response = self.llm_guided_selector.select_actions(selection_request)
+            
+            # 6. 記錄選擇結果
+            logger.info(f"LLM-guided selection: {len(response.selected_actions)} actions selected")
+            logger.info(f"Selection reasoning: {response.reasoning[:200]}...")
+            logger.info(f"Selection confidence: {response.confidence:.2f}")
+            
+            if response.fallback_used:
+                logger.warning("LLM-guided selector used fallback method")
+            
+            return response.selected_actions
+            
+        except Exception as e:
+            logger.error(f"Error in LLM-guided action selection: {e}")
+            return []
+    
+    def _get_optimization_goal(self) -> str:
+        """獲取優化目標描述"""
+        # 這裡可以從配置文件或其他地方獲取具體的優化目標
+        # 目前使用默認的描述
+        return "Molecular optimization for improved drug-like properties, bioactivity, and chemical diversity"
     
     def _get_fallback_actions(self, parent_smiles: str, depth: int, k_init: int) -> List[Dict[str, Any]]:
         """
@@ -253,14 +347,22 @@ class MCTSEngine:
             # 使用 LLM 生成新的 SMILES
             new_smiles_list = self.llm_gen.generate_batch(parent_smiles, actions)
             
-            # 創建子節點
+            # 創建子節點並記錄生成動作
             valid_children = []
-            for smiles in new_smiles_list:
+            for i, smiles in enumerate(new_smiles_list):
                 if smiles and smiles != parent_smiles and smiles not in parent_node.children:
-                    child_node = parent_node.add_child(smiles, parent_node.depth + 1)
+                    # 獲取對應的生成動作
+                    generating_action = actions[i] if i < len(actions) else None
+                    
+                    # 使用增強的 add_child 方法創建子節點
+                    child_node = parent_node.add_child(
+                        smiles, 
+                        parent_node.depth + 1,
+                        generating_action=generating_action
+                    )
                     self.nodes[smiles] = child_node
                     valid_children.append(smiles)
-                    logger.debug(f"Added child: {smiles}")
+                    logger.debug(f"Added child: {smiles} with action: {generating_action.get('name', 'Unknown') if generating_action else 'None'}")
             
             logger.info(f"Expansion complete: {len(valid_children)} valid children generated")
             return valid_children

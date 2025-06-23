@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Any
 import logging
 
 logger = logging.getLogger(__name__)
@@ -13,6 +13,7 @@ class Node:
     - 節點數據管理（屬性存取、更新）
     - 基本的父子關係操作
     - 節點狀態查詢
+    - 動作歷史追蹤
     """
     smiles: str
     depth: int = 0
@@ -23,7 +24,11 @@ class Node:
     children: Dict[str, "Node"] = field(default_factory=dict)
     parent: Optional["Node"] = None
     is_terminal: bool = False
-
+    
+    # 新增：動作歷史追蹤
+    generating_action: Optional[Dict[str, Any]] = None  # 生成此節點的動作
+    action_effects: Dict[str, Any] = field(default_factory=dict)  # 動作效果記錄
+    
     # ========== 核心屬性計算 ==========
     
     @property
@@ -42,9 +47,15 @@ class Node:
         """更新節點統計"""
         self.visits += 1
         self.total_score += score
+        
+        # 更新動作效果記錄
+        if self.generating_action:
+            self.action_effects['score_improvement'] = score - (self.parent.avg_score if self.parent and self.parent.visits > 0 else 0.0)
+            self.action_effects['current_score'] = score
+            
         logger.debug(f"Updated node {self.smiles}: visits={self.visits}, avg_score={self.avg_score:.4f}")
     
-    def add_child(self, child_smiles: str, child_depth: int = None) -> "Node":
+    def add_child(self, child_smiles: str, child_depth: int = None, generating_action: Dict[str, Any] = None) -> "Node":
         """添加子節點"""
         if child_depth is None:
             child_depth = self.depth + 1
@@ -52,7 +63,8 @@ class Node:
         child_node = Node(
             smiles=child_smiles, 
             depth=child_depth,
-            parent=self
+            parent=self,
+            generating_action=generating_action
         )
         self.children[child_smiles] = child_node
         return child_node
@@ -123,6 +135,96 @@ class Node:
         if not self.parent:
             return 0
         return len(self.parent.children) - 1  # 排除自己
+    
+    # ========== 動作歷史追蹤方法 ==========
+    
+    def get_action_history(self) -> List[Dict[str, Any]]:
+        """獲取從根節點到當前節點的動作歷史"""
+        history = []
+        current = self
+        
+        while current and current.generating_action:
+            action_record = {
+                'action': current.generating_action,
+                'depth': current.depth,
+                'smiles': current.smiles,
+                'parent_smiles': current.parent.smiles if current.parent else None,
+                'score_improvement': current.action_effects.get('score_improvement', 0.0),
+                'current_score': current.action_effects.get('current_score', 0.0),
+                'visits': current.visits
+            }
+            history.append(action_record)
+            current = current.parent
+            
+        return history[::-1]  # 反轉以從根開始
+    
+    def get_recent_actions(self, n: int = 3) -> List[Dict[str, Any]]:
+        """獲取最近的 n 個動作"""
+        history = self.get_action_history()
+        return history[-n:] if history else []
+    
+    def get_action_trajectory_summary(self) -> Dict[str, Any]:
+        """獲取動作軌跡摘要，用於LLM上下文"""
+        history = self.get_action_history()
+        
+        if not history:
+            return {
+                'total_actions': 0,
+                'action_types': [],
+                'score_trend': 'unknown',
+                'recent_actions': []
+            }
+        
+        # 統計動作類型
+        action_types = [action['action'].get('type', 'unknown') for action in history]
+        action_type_counts = {}
+        for action_type in action_types:
+            action_type_counts[action_type] = action_type_counts.get(action_type, 0) + 1
+        
+        # 分析分數趨勢
+        scores = [action.get('current_score', 0.0) for action in history if action.get('current_score') is not None]
+        score_trend = 'unknown'
+        if len(scores) >= 2:
+            recent_trend = scores[-3:] if len(scores) >= 3 else scores
+            if len(recent_trend) >= 2:
+                if recent_trend[-1] > recent_trend[0]:
+                    score_trend = 'improving'
+                elif recent_trend[-1] < recent_trend[0]:
+                    score_trend = 'declining'
+                else:
+                    score_trend = 'stable'
+        
+        return {
+            'total_actions': len(history),
+            'action_types': list(action_type_counts.keys()),
+            'action_type_counts': action_type_counts,
+            'score_trend': score_trend,
+            'recent_actions': self.get_recent_actions(3),
+            'current_depth': self.depth,
+            'total_visits': self.visits,
+            'avg_score': self.avg_score
+        }
+    
+    def get_successful_action_patterns(self) -> List[Dict[str, Any]]:
+        """獲取成功的動作模式（分數改善的動作）"""
+        history = self.get_action_history()
+        successful_actions = []
+        
+        for action_record in history:
+            score_improvement = action_record.get('score_improvement', 0.0)
+            if score_improvement > 0.01:  # 閾值：顯著改善
+                successful_actions.append({
+                    'action': action_record['action'],
+                    'improvement': score_improvement,
+                    'context': {
+                        'depth': action_record['depth'],
+                        'parent_smiles': action_record['parent_smiles']
+                    }
+                })
+        
+        # 按改善程度排序
+        successful_actions.sort(key=lambda x: x['improvement'], reverse=True)
+        return successful_actions
     
     # ========== 序列化和表示 ==========
     

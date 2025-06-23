@@ -36,13 +36,21 @@ workflow:
 
 # LLM 設定
 llm:
-  provider: cerebras  # 使用 cerebras 而不是 openai
+  provider: cerebras  # 可選 "github" 或 "cerebras"
+  
+  # Cerebras 設定
   model_name: qwen-3-32b
+  api_key: csk-r45fve4re56cxcmmvj8j4f5c5hrvt893deyk9p9pwre36t38
+  
+  # GitHub 設定（當 provider 為 "github" 時使用）
+  github_model_name: openai/gpt-4.1
+  github_api_key: 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
+  
+  # 通用設定
   temperature: 0.2
   max_completion_tokens: 8192
   top_p: 1
   stream: true
-  api_key: csk-r45fve4re56cxcmmvj8j4f5c5hrvt893deyk9p9pwre36t38
 
 # LangSmith 設定
 langsmith:

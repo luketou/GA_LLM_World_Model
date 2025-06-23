@@ -44,11 +44,21 @@ if cfg.get("langsmith", {}).get("enabled", False) and not os.environ.get("LANGSM
     os.environ["LANGSMITH_PROJECT"] = langsmith_config.get("project", "world model agent")
     logger.info(f"LangSmith tracing enabled for project: {langsmith_config.get('project', 'world model agent')}")
 
-# 設定 Cerebras API 金鑰（如果尚未設定）
+# 設定 API 金鑰（根據選擇的 provider）
 llm_config = cfg.get("llm", {})
-if llm_config.get("api_key") and not os.environ.get("CEREBRAS_API_KEY"):
-    os.environ["CEREBRAS_API_KEY"] = llm_config.get("api_key")
-    logger.info("Cerebras API key loaded from settings.yml")
+provider = llm_config.get("provider", "cerebras")
+
+if provider == "github":
+    # 設定 GitHub API 金鑰
+    github_api_key = llm_config.get("github_api_key")
+    if github_api_key and not os.environ.get("GITHUB_TOKEN"):
+        os.environ["GITHUB_TOKEN"] = github_api_key
+        logger.info("GitHub API key loaded from settings.yml")
+elif provider == "cerebras":
+    # 設定 Cerebras API 金鑰
+    if llm_config.get("api_key") and not os.environ.get("CEREBRAS_API_KEY"):
+        os.environ["CEREBRAS_API_KEY"] = llm_config.get("api_key")
+        logger.info("Cerebras API key loaded from settings.yml")
 
 from oracle.guacamol_client import GuacaMolOracle
 from llm.generator import LLMGenerator
@@ -73,16 +83,25 @@ oracle = GuacaMolOracle(cfg["TASK_NAME"])
 # 初始化 LLM Generator，從配置檔案讀取所有參數
 llm_config = cfg.get("llm", {}).copy()
 
+# 根據 provider 選擇正確的模型名稱和 API 金鑰
+provider = llm_config.get("provider", "cerebras")
+if provider == "github":
+    model_name = llm_config.get("github_model_name", "openai/gpt-4.1")
+    api_key = llm_config.get("github_api_key")
+else:
+    model_name = llm_config.get("model_name", "qwen-3-32b")
+    api_key = llm_config.get("api_key")
+
 # 確保所有必要的參數都被傳遞，並設置正確的參數名稱
 llm_gen = LLMGenerator(
-    provider=llm_config.get("provider", "cerebras"),
-    model_name=llm_config.get("model_name", "qwen-3-32b"),
+    provider=provider,
+    model_name=model_name,
     temperature=llm_config.get("temperature", 0.2),
     max_completion_tokens=llm_config.get("max_completion_tokens", 8192),
     max_smiles_length=llm_config.get("max_smiles_length", MAX_SMILES_LENGTH),
     top_p=llm_config.get("top_p", 1.0),
     stream=llm_config.get("stream", False),  # 暫時關閉 stream
-    api_key=llm_config.get("api_key")
+    api_key=api_key
 )
 
 engine = MCTSEngine(kg, cfg["max_depth"], llm_gen=llm_gen)
@@ -174,8 +193,8 @@ def compute_adv(state: AgentState):
 @traceable
 def expand_node(state: AgentState):
     """
-    擴展 MCTS 樹：創建新的子節點結構，不進行分數更新
-    職責：純粹的樹結構擴展
+    擴展 MCTS 樹：創建新的子節點結構，並記錄生成動作
+    職責：純粹的樹結構擴展，包含動作歷史追蹤
     """
     print(f"[Debug] Expanding tree from parent {state.parent_smiles} with {len(state.batch_smiles)} potential children")
     
@@ -186,21 +205,25 @@ def expand_node(state: AgentState):
     else:
         parent_node = engine.get_node(state.parent_smiles)
     
-    # 創建子節點結構（不更新分數）
+    # 創建子節點結構（包含動作歷史）
     new_children_count = 0
     for i, child_smiles in enumerate(state.batch_smiles):
         if child_smiles not in parent_node.children:
-            # 創建子節點，但不設置分數
-            child_node = engine.get_or_create_node(child_smiles, state.depth + 1)
-            child_node.parent = parent_node
+            # 創建子節點，並記錄生成動作
+            generating_action = state.actions[i] if i < len(state.actions) else None
             
-            # 添加到父節點的子節點字典
-            parent_node.children[child_smiles] = child_node
+            # 使用增強的 add_child 方法
+            child_node = parent_node.add_child(
+                child_smiles, 
+                state.depth + 1, 
+                generating_action=generating_action
+            )
+            
+            # 確保節點也在引擎中註冊
+            engine.nodes[child_smiles] = child_node
             new_children_count += 1
             
-            # 記錄對應的動作（用於後續分析）
-            if i < len(state.actions):
-                child_node.generating_action = state.actions[i]
+            print(f"[Debug] Created child {child_smiles[:30]}... with action: {generating_action.get('name', 'Unknown') if generating_action else 'None'}")
     
     print(f"[Debug] Expansion complete: {new_children_count} new children added, parent now has {len(parent_node.children)} total children")
     return state
@@ -278,7 +301,7 @@ def decide(state: AgentState):
     print(f"[Debug] Decide: current parent={state.parent_smiles}, depth={state.depth}")
     print(f"[Debug] Oracle calls left: {oracle.calls_left}")
     
-    # 動態樹修剪觸發器
+    # 動態樹修剪觰發器
     if not hasattr(engine, 'iteration_count'):
         engine.iteration_count = 0
     engine.iteration_count += 1
@@ -538,4 +561,47 @@ async def run_workflow(initial_state):
         return None
 
 # 確保 engine 可以被外部導入
-__all__ = ['graph_app', 'AgentState', 'oracle', 'cfg', 'engine', 'run_workflow']
+__all__ = ['graph_app', 'AgentState', 'oracle', 'cfg', 'engine', 'run_workflow', 'create_workflow_components']
+
+def create_workflow_components(config):
+    """
+    創建工作流程組件的工廠函數，供 main.py 使用
+    
+    Args:
+        config: 配置字典
+        
+    Returns:
+        tuple: (oracle, engine, graph_app)
+    """
+    global cfg, oracle, engine, graph_app
+    cfg = config
+    
+    # 重新初始化組件以使用新配置
+    kg = create_kg_store(KGConfig(**cfg["kg"]))
+    oracle = GuacaMolOracle(cfg["TASK_NAME"])
+    
+    # 重新初始化 LLM Generator
+    llm_config = cfg.get("llm", {}).copy()
+    provider = llm_config.get("provider", "cerebras")
+    
+    if provider == "github":
+        model_name = llm_config.get("github_model_name", "openai/gpt-4.1")
+        api_key = llm_config.get("github_api_key")
+    else:
+        model_name = llm_config.get("model_name", "qwen-3-32b")
+        api_key = llm_config.get("api_key")
+    
+    llm_gen = LLMGenerator(
+        provider=provider,
+        model_name=model_name,
+        temperature=llm_config.get("temperature", 0.2),
+        max_completion_tokens=llm_config.get("max_completion_tokens", 8192),
+        max_smiles_length=llm_config.get("max_smiles_length", cfg.get("workflow", {}).get("max_smiles_length", 100)),
+        top_p=llm_config.get("top_p", 1.0),
+        stream=llm_config.get("stream", False),
+        api_key=api_key
+    )
+    
+    engine = MCTSEngine(kg, cfg["max_depth"], llm_gen=llm_gen)
+    
+    return oracle, engine, graph_app

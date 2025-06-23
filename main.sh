@@ -43,7 +43,7 @@ rm -rf log/main.log
 mkdir -p /log
 touch log/main.log
 
-python main.py 2>&1 | tee -a log/main.log
+python main.py --provider github 2>&1 | tee -a log/main.log
 
 ELAPSED_TIME=$(($SECONDS - $START_TIME))
 echo '=========================================================='
