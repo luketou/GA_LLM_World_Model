@@ -56,7 +56,7 @@ class GitHubClient:
     @traceable(name="GitHub::generate")
     def generate(self, messages: List[Dict[str, str]]) -> str:
         """
-        生成文本
+        生成文本 - 增強 LangSmith 追蹤
         
         Args:
             messages: 對話消息列表
@@ -65,10 +65,27 @@ class GitHubClient:
             生成的文本
         """
         try:
+            # 記錄請求詳情到 LangSmith
+            logger.info(f"GitHub API Request - Model: {self.model_name}")
+            logger.info(f"Request parameters - Temperature: {self.temperature}, Max tokens: {self.max_completion_tokens}")
+            logger.debug(f"Input messages count: {len(messages)}")
+            
+            # 記錄輸入內容預覽
+            for i, msg in enumerate(messages):
+                content_preview = msg.get('content', '')
+                logger.debug(f"Message {i}: {msg.get('role', 'unknown')} - {content_preview}")
+            
             if self.stream:
-                return self._generate_stream(messages)
+                response = self._generate_stream(messages)
             else:
-                return self._generate_sync(messages)
+                response = self._generate_sync(messages)
+            
+            # 記錄響應詳情到 LangSmith
+            logger.info(f"GitHub API Response - Length: {len(response)} characters")
+            response_preview = response
+            logger.debug(f"Response preview: {response_preview}")
+            
+            return response
                 
         except Exception as e:
             logger.error(f"Error generating text with GitHub: {e}")

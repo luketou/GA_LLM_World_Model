@@ -19,6 +19,7 @@ class Node:
     depth: int = 0
     visits: int = 0
     total_score: float = 0.0
+    oracle_score: float = 0.0  # 新增：存儲 Oracle 的原始分數
     advantage: float = 0.0
     regret: float = 0.0
     children: Dict[str, "Node"] = field(default_factory=dict)
@@ -47,13 +48,14 @@ class Node:
         """更新節點統計"""
         self.visits += 1
         self.total_score += score
+        self.oracle_score = score  # 存儲最新的 Oracle 分數
         
         # 更新動作效果記錄
         if self.generating_action:
-            self.action_effects['score_improvement'] = score - (self.parent.avg_score if self.parent and self.parent.visits > 0 else 0.0)
+            self.action_effects['score_improvement'] = score - (self.parent.oracle_score if self.parent else 0.0)
             self.action_effects['current_score'] = score
             
-        logger.debug(f"Updated node {self.smiles}: visits={self.visits}, avg_score={self.avg_score:.4f}")
+        logger.debug(f"Updated node {self.smiles}: visits={self.visits}, oracle_score={self.oracle_score:.4f}, avg_score={self.avg_score:.4f}")
     
     def add_child(self, child_smiles: str, child_depth: int = None, generating_action: Dict[str, Any] = None) -> "Node":
         """添加子節點"""
@@ -235,6 +237,7 @@ class Node:
             "depth": self.depth,
             "visits": self.visits,
             "total_score": self.total_score,
+            "oracle_score": self.oracle_score,  # 新增：包含 Oracle 分數
             "avg_score": self.avg_score,
             "advantage": self.advantage,
             "regret": self.regret,

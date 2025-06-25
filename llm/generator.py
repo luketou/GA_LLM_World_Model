@@ -18,7 +18,7 @@ from typing import List, Dict, Any, Optional
 from langsmith import traceable
 from .cerebras_client import CerebrasClient
 from .github_client import GitHubClient
-from .prompt import create_llm_messages
+from .prompt import create_enhanced_llm_messages, create_simple_generation_prompt, create_fallback_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -71,20 +71,26 @@ class LLMGenerator:
                 api_key=api_key
             )
         elif provider == "cerebras":
-            from cerebras.cloud.sdk import Cerebras
             # 使用傳入的 api_key 或環境變數
             api_key = api_key or os.getenv("CEREBRAS_API_KEY")
             if not api_key:
                 raise ValueError("CEREBRAS_API_KEY is required")
             
-            self.client = Cerebras(api_key=api_key)
+            self.client = CerebrasClient(
+                model_name=model_name,
+                temperature=temperature,
+                max_completion_tokens=max_completion_tokens,
+                top_p=top_p,
+                stream=stream,
+                api_key=api_key
+            )
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
     @traceable
     def generate_batch(self, parent_smiles: str, actions: List[Dict], max_retries: int = 3) -> List[str]:
         """
-        根據動作列表生成分子的 SMILES - 智能重新生成直到獲得足夠的有效分子
+        根據動作列表生成分子的 SMILES - 使用 <SMILES></SMILES> token 標記提升準確性
         """
         import time
         start_time = time.time()
@@ -98,7 +104,10 @@ class LLMGenerator:
         valid_smiles = []
         valid_smiles_set = set()
         total_attempts = 0
-        max_total_attempts = max_retries * 3  # 允許更多嘗試
+        max_total_attempts = max_retries * 3
+        
+        # 導入提示模板
+        from .prompt import create_enhanced_llm_messages, create_simple_generation_prompt, create_fallback_prompt
         
         while len(valid_smiles) < target_count and total_attempts < max_total_attempts:
             total_attempts += 1
@@ -107,83 +116,45 @@ class LLMGenerator:
             print(f"[LLM-DEBUG] Attempt {total_attempts}: Need {needed_count} more valid SMILES (have {len(valid_smiles)}/{target_count})")
             
             try:
-                # 動態調整請求數量 - 請求比需要的多一些以提高效率
-                request_count = min(needed_count * 2, len(actions))  # 最多請求原始數量的2倍
+                # 根據嘗試次數選擇不同的提示策略
+                if total_attempts <= 2:
+                    # 前兩次使用增強提示
+                    messages = create_enhanced_llm_messages(parent_smiles, actions)
+                elif total_attempts <= 4:
+                    # 第3-4次使用簡單提示
+                    messages = create_simple_generation_prompt(parent_smiles, needed_count)
+                else:
+                    # 後續使用最簡化提示
+                    messages = create_fallback_prompt(parent_smiles, needed_count)
                 
-                # 為剩餘的動作構建提示
-                remaining_actions = actions[-request_count:] if total_attempts == 1 else actions[:request_count]
-                
-                action_descriptions = []
-                for i, action in enumerate(remaining_actions):
-                    description = action.get('description', action.get('name', f'action_{i}'))
-                    action_descriptions.append(f"{i+1}. {description}")
-                
-                prompt = f"""You are an expert medicinal chemist. Given a parent molecule and a list of chemical modifications, generate new valid SMILES.
-Parent molecule: {parent_smiles}
-Chemical modifications to apply:
-{chr(10).join(action_descriptions)}
-
-Generate exactly {request_count} new SMILES, one per line. Each SMILES should:
-- Be chemically valid and reasonable
-- Apply the corresponding modification to the parent molecule
-- Have molecular weight < 800 Da
-- Be under {self.max_smiles_length} characters
-- Be structurally diverse
-
-SMILES (one per line):"""
-                
-                print(f"[LLM-DEBUG] Calling {self.provider} API for {request_count} SMILES...")
+                print(f"[LLM-DEBUG] Calling {self.provider} API for {needed_count} SMILES...")
                 api_start = time.time()
                 
-                if self.provider == "github":
-                    response = self.client.generate([{"role": "user", "content": prompt}])
-                    content = response
-                elif self.provider == "cerebras":
-                    response = self.client.chat.completions.create(
-                        model=self.model_name,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=self.temperature,
-                        max_completion_tokens=self.max_tokens,
-                        top_p=self.top_p,
-                        stream=False
-                    )
-                    content = response.choices[0].message.content
+                content = self.client.generate(messages)
                 
                 api_time = time.time() - api_start
                 print(f"[LLM-DEBUG] API call completed in {api_time:.2f}s")
                 
-                # 解析和驗證生成的 SMILES
-                lines = [line.strip() for line in content.strip().split('\n') if line.strip()]
-                print(f"[LLM-DEBUG] Parsing {len(lines)} lines from response")
+                # 使用新的提取方法解析 SMILES
+                new_smiles = self._extract_smiles_from_response(content)
                 
-                new_valid_count = 0
-                for i, line in enumerate(lines):
-                    # 清理 SMILES 字符串
-                    smiles = re.sub(r'^\d+\.\s*', '', line.strip())
-                    smiles = re.sub(r'^[-*]\s*', '', smiles.strip())
-                    smiles = smiles.split()[0] if smiles.split() else ""
-                    
-                    if smiles and len(smiles) >= 2:
-                        # 驗證 SMILES
-                        if self.validate_smiles(smiles) and smiles not in valid_smiles_set:
-                            valid_smiles.append(smiles)
-                            valid_smiles_set.add(smiles)
-                            new_valid_count += 1
-                            print(f"[LLM-DEBUG] Added valid SMILES #{len(valid_smiles)}: {smiles}")
-                        else:
-                            print(f"[LLM-DEBUG] Rejected SMILES: {smiles} (invalid or duplicate)")
+                # 去重並添加到結果中
+                for smiles in new_smiles:
+                    if smiles not in valid_smiles_set and len(valid_smiles) < target_count:
+                        valid_smiles.append(smiles)
+                        valid_smiles_set.add(smiles)
                 
-                print(f"[LLM-DEBUG] Added {new_valid_count} new valid SMILES in this attempt")
+                print(f"[LLM-DEBUG] Added {len(new_smiles)} new valid SMILES in this attempt")
                 
                 # 如果這次嘗試沒有獲得任何有效分子，嘗試使用回退方法
-                if new_valid_count == 0:
+                if len(new_smiles) == 0:
                     print(f"[LLM-DEBUG] No valid SMILES generated, using fallback methods")
-                    for fallback_attempt in range(min(needed_count, 5)):  # 最多生成5個回退分子
+                    for fallback_attempt in range(min(needed_count, 3)):
                         fallback_smiles = self.fallback_smiles_generation(parent_smiles)
                         if fallback_smiles and fallback_smiles not in valid_smiles_set:
                             valid_smiles.append(fallback_smiles)
                             valid_smiles_set.add(fallback_smiles)
-                            print(f"[LLM-DEBUG] Added fallback SMILES #{len(valid_smiles)}: {fallback_smiles}")
+                            print(f"[LLM-DEBUG] Added fallback SMILES #{fallback_attempt+1}: {fallback_smiles}")
                 
             except Exception as e:
                 print(f"[LLM-DEBUG] Error in attempt {total_attempts}: {e}")
@@ -235,6 +206,58 @@ SMILES (one per line):"""
         logger.info(f"Generated {len(valid_smiles)} SMILES from {target_count} actions in {total_attempts} attempts")
         
         return valid_smiles
+
+    def _extract_smiles_from_response(self, response_text: str) -> List[str]:
+        """
+        從 LLM 回應中提取 SMILES - 使用 <SMILES></SMILES> token 標記
+        """
+        smiles_list = []
+        
+        try:
+            # 方法 1: 使用正則表達式提取 <SMILES></SMILES> 標記中的內容
+            import re
+            pattern = r'<SMILES>(.*?)</SMILES>'
+            matches = re.findall(pattern, response_text, re.IGNORECASE | re.MULTILINE)
+            
+            for match in matches:
+                smiles = match.strip()
+                if smiles and self.validate_smiles(smiles):
+                    smiles_list.append(smiles)
+                    logger.debug(f"[TOKEN-EXTRACT] Valid SMILES found: {smiles}")
+                else:
+                    logger.debug(f"[TOKEN-EXTRACT] Invalid SMILES rejected: {smiles}")
+            
+            # 方法 2: 如果正則表達式沒有找到結果，嘗試逐行解析
+            if not smiles_list:
+                logger.debug("[TOKEN-EXTRACT] No token-marked SMILES found, trying line-by-line parsing")
+                lines = response_text.strip().split('\n')
+                
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # 嘗試從行中提取 SMILES
+                    if '<SMILES>' in line and '</SMILES>' in line:
+                        start = line.find('<SMILES>') + 8
+                        end = line.find('</SMILES>')
+                        if start < end:
+                            smiles = line[start:end].strip()
+                            if smiles and self.validate_smiles(smiles):
+                                smiles_list.append(smiles)
+                                logger.debug(f"[LINE-EXTRACT] Valid SMILES found: {smiles}")
+                    else:
+                        # 檢查是否是純 SMILES 行（作為後備）
+                        if self.validate_smiles(line):
+                            smiles_list.append(line)
+                            logger.debug(f"[PLAIN-EXTRACT] Valid SMILES found: {line}")
+            
+            logger.info(f"[SMILES-EXTRACT] Total valid SMILES extracted: {len(smiles_list)}")
+            return smiles_list
+            
+        except Exception as e:
+            logger.error(f"Error extracting SMILES from response: {e}")
+            return []
 
     def generate_simple_variation(self, parent_smiles: str, index: int) -> str:
         """

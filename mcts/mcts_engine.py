@@ -462,29 +462,68 @@ class MCTSEngine:
             import random
             return random.choice(list(parent_node.children.keys()))
     
-    def backpropagate(self, smiles_list: List[str], scores: List[float]):
-        """反向傳播分數 - 使用簡化的反向傳播邏輯"""
-        if len(smiles_list) != len(scores):
-            logger.error(f"Mismatch: {len(smiles_list)} smiles vs {len(scores)} scores")
+    def _propagate_to_ancestors(self, node: Node):
+        """
+        將分數從指定節點向上傳播到所有祖先節點。
+        此方法更新祖先的 `visits` 和 `total_score`，但不改變其 `oracle_score`。
+        """
+        if not node.parent:
+            return
+
+        # The score to propagate is the one most recently added to the node.
+        # The node's oracle_score holds the raw score from the last evaluation.
+        score_to_propagate = node.oracle_score
+        
+        current = node.parent
+        while current:
+            current.visits += 1
+            current.total_score += score_to_propagate
+            current = current.parent
+
+    def backpropagate(self, batch_smiles: List[str], scores: List[float]):
+        """
+        反向傳播分數到相關節點
+        
+        Args:
+            batch_smiles: 分子 SMILES 列表
+            scores: 對應的分數列表
+        """
+        logger.info(f"Starting backpropagation for {len(batch_smiles)} molecules")
+        
+        if len(batch_smiles) != len(scores):
+            logger.warning(f"Batch size mismatch: {len(batch_smiles)} SMILES vs {len(scores)} scores")
             return
         
         updated_count = 0
-        for smiles, score in zip(smiles_list, scores):
-            node = self.nodes.get(smiles)
-            if node:
-                node.update(score)
-                
-                # 簡化的反向傳播：向上傳播到父節點
-                current = node.parent
-                decay_factor = 0.9
-                while current:
-                    current.update(score * decay_factor)
-                    current = current.parent
-                    decay_factor *= 0.9
-                
-                updated_count += 1
+        
+        try:
+            # 更新所有子節點
+            for smiles, score in zip(batch_smiles, scores):
+                node = self.nodes.get(smiles)
+                if node:
+                    node.update(score)
                     
-        logger.info(f"Backpropagation complete: updated {updated_count}/{len(smiles_list)} nodes")
+                    # 更新最佳節點 - 使用 oracle_score 而非 avg_score
+                    if not self.best or score > getattr(self.best, 'oracle_score', 0.0):
+                        self.best = node
+                        logger.info(f"New best node: {smiles} with oracle_score {score:.4f}")
+                    
+                    updated_count += 1
+                else:
+                    logger.warning(f"Node not found for SMILES: {smiles}")
+            
+            # 向上傳播到祖先節點
+            for smiles in batch_smiles:
+                node = self.nodes.get(smiles)
+                if node and node.parent:
+                    self._propagate_to_ancestors(node)
+                    
+        except Exception as e:
+            logger.error(f"Error during backpropagation: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+        
+        logger.info(f"Backpropagation complete: updated {updated_count}/{len(batch_smiles)} nodes")
     
     def get_best_node(self) -> Optional[Node]:
         """獲取最佳節點 - 使用 TreeAnalytics 或後備方案"""

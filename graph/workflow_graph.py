@@ -166,15 +166,30 @@ async def oracle_score(state: AgentState):
         if state.actions:
             state.actions = [state.actions[i] for i in filtered_indices]
     
+    # Deduplicate SMILES before scoring
+    unique_smiles = list(set(state.batch_smiles))
+    if len(unique_smiles) < len(state.batch_smiles):
+        logger.info(f"Removed {len(state.batch_smiles) - len(unique_smiles)} duplicate SMILES before scoring.")
+    
+    if not unique_smiles:
+        logger.warning("No unique SMILES to score.")
+        state.scores = []
+        print(f"[Debug] No unique SMILES to score, continuing with empty scores")
+        return state
+    
     try:
-        scores = await oracle.score_async(filtered_smiles)
-        state.scores = scores
-        print(f"[Debug] Oracle returned scores: {scores}")
+        scores = await oracle.score_async(unique_smiles)
+        
+        # Map scores back to original SMILES order
+        score_map = {smile: score for smile, score in zip(unique_smiles, scores)}
+        state.scores = [score_map[smile] for smile in state.batch_smiles]
+        
+        print(f"[Debug] Oracle returned scores: {state.scores}")
         print(f"[Debug] Oracle calls remaining: {oracle.calls_left}")
     except Exception as e:
         logger.error(f"Oracle scoring failed: {e}")
         # 提供默認分數以避免工作流停止
-        state.scores = [0.0] * len(filtered_smiles)
+        state.scores = [0.0] * len(state.batch_smiles)
         print(f"[Debug] Using default scores: {state.scores}")
     
     print(f"[Debug] Oracle scoring complete, proceeding to next node")
@@ -263,10 +278,10 @@ def update_stores(state: AgentState):
             child_node.update(score)
             child_node.advantage = advantage
             
-            # 更新全局最佳
-            if not engine.best or score > engine.best.avg_score:
+            # 更新全局最佳 - 使用 oracle_score 而非 avg_score
+            if not engine.best or score > getattr(engine.best, 'oracle_score', 0.0):
                 engine.best = child_node
-                print(f"[Debug] New best: {child_smiles[:30]}... score={score:.4f}")
+                print(f"[Debug] New best: {child_smiles[:30]}... oracle_score={score:.4f}")
 
     # 2. 執行 MCTS 反向傳播
     engine.backpropagate(state.batch_smiles, state.scores)
@@ -334,10 +349,10 @@ def decide(state: AgentState):
     # 早停條件：找到高分分子
     early_stop_threshold = cfg.get("workflow", {}).get("early_stop_threshold", 0.8)
     if (hasattr(engine, 'best') and engine.best and 
-        hasattr(engine.best, 'total_score') and 
-        engine.best.total_score >= early_stop_threshold):
-        print(f"[Debug] Early stopping: Found high-score molecule (score: {engine.best.total_score:.4f} >= {early_stop_threshold})")
-        state.result = {"best": engine.best, "reason": f"Early stop - high score ({engine.best.total_score:.4f})"}
+        hasattr(engine.best, 'oracle_score') and 
+        engine.best.oracle_score >= early_stop_threshold):
+        print(f"[Debug] Early stopping: Found high-score molecule (oracle_score: {engine.best.oracle_score:.4f} >= {early_stop_threshold})")
+        state.result = {"best": engine.best, "reason": f"Early stop - high score ({engine.best.oracle_score:.4f})"}
         return state
     
     # 次要終止條件：達到最大深度

@@ -221,7 +221,11 @@ async def run():
                 
                 if best_result_node and hasattr(best_result_node, 'smiles'):
                     logger.info(f"[Workflow] Best SMILES: {best_result_node.smiles}")
-                    logger.info(f"[Workflow] Best score: {getattr(best_result_node, 'total_score', 'N/A')}")
+                    # 使用 oracle_score 而非 total_score
+                    oracle_score = getattr(best_result_node, 'oracle_score', 0.0)
+                    total_score = getattr(best_result_node, 'total_score', 0.0)
+                    logger.info(f"[Workflow] Best oracle score: {oracle_score}")
+                    logger.info(f"[Workflow] Best total score: {total_score}")
                     logger.info(f"[Workflow] Depth: {getattr(best_result_node, 'depth', 'N/A')}")
                     logger.info(f"[Workflow] Visits: {getattr(best_result_node, 'visits', 'N/A')}")
                 else:
@@ -274,7 +278,11 @@ async def run():
         
     # 4. 輸出最終結果
     if best_result_node and hasattr(best_result_node, 'smiles'):
-        score_to_print = getattr(best_result_node, 'total_score', 0.0)
+        # 優先使用 oracle_score，如果不存在則使用 total_score
+        oracle_score = getattr(best_result_node, 'oracle_score', 0.0)
+        total_score = getattr(best_result_node, 'total_score', 0.0)
+        score_to_print = oracle_score if oracle_score != 0.0 else total_score
+        
         if not isinstance(score_to_print, (int, float)):
             score_to_print = 0.0
             
@@ -282,6 +290,8 @@ async def run():
         langsmith_outputs = {
             "success": True,
             "best_smiles": best_result_node.smiles,
+            "best_oracle_score": oracle_score,
+            "best_total_score": total_score,
             "best_score": score_to_print,
             "final_depth": getattr(best_result_node, 'depth', 'N/A'),
             "visits": getattr(best_result_node, 'visits', 'N/A'),
@@ -292,6 +302,10 @@ async def run():
         print(f"\n=== FINAL RESULT ===")
         print(f"BEST SMILES: {best_result_node.smiles}")
         print(f"BEST SCORE:  {score_to_print:.4f}")
+        if oracle_score != 0.0:
+            print(f"ORACLE SCORE: {oracle_score:.4f}")
+        if total_score != oracle_score:
+            print(f"TOTAL SCORE:  {total_score:.4f}")
         print(f"VISITS:      {getattr(best_result_node, 'visits', 'N/A')}")
         print(f"ORACLE CALLS REMAINING: {oracle.calls_left}")
         print(f"LLM PROVIDER: {cfg['llm'].get('provider', 'cerebras')}")
