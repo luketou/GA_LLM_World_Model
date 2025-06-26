@@ -117,6 +117,7 @@ def create_fallback_prompt(parent_smiles: str, num_variants: int = 5) -> List[Di
         {
             "role": "system", 
             "content": f"Generate {num_variants} valid SMILES. Use format: <SMILES>SMILES_STRING</SMILES>"
+            # Removed: + "\nYour entire response MUST be a valid JSON object, and nothing else."
         },
         {
             "role": "user", 

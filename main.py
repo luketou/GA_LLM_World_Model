@@ -16,6 +16,13 @@ import os
 import sys
 import argparse
 
+# Set up logging FIRST to ensure all modules can use it
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
 # Ensure project root is in Python path
 project_root = os.path.dirname(os.path.abspath(__file__))
 if project_root not in sys.path:
@@ -113,14 +120,6 @@ def setup_environment(args):
         return cfg
     else:
         raise FileNotFoundError("config/settings.yml not found")
-
-# 設置日誌
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
 
 def prescan(cfg, oracle):
     """

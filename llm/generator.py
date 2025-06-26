@@ -94,7 +94,7 @@ class LLMGenerator:
         """
         import time
         start_time = time.time()
-        print(f"[LLM-DEBUG] Starting generate_batch with {len(actions)} actions")
+        logger.debug(f"[LLM-DEBUG] Starting generate_batch with {len(actions)} actions")
         
         if not actions:
             logger.warning("No actions provided for generation")
@@ -112,8 +112,8 @@ class LLMGenerator:
         while len(valid_smiles) < target_count and total_attempts < max_total_attempts:
             total_attempts += 1
             needed_count = target_count - len(valid_smiles) # 每次嘗試需要補充的數量
-            
-            print(f"[LLM-DEBUG] Attempt {total_attempts}: Need {needed_count} more valid SMILES (have {len(valid_smiles)}/{target_count})")
+
+            logger.debug(f"[LLM-DEBUG] Attempt {total_attempts}: Need {needed_count} more valid SMILES (have {len(valid_smiles)}/{target_count})")
             
             try:
                 # 根據嘗試次數選擇不同的提示策略
@@ -465,6 +465,19 @@ class LLMGenerator:
 
             # 2. 檢查是否有不應存在的空格
             if ' ' in smiles:
+                return False
+            
+            # 3. 檢查是否包含常見的 LLM 錯誤輸出模式
+            # 例如：包含解釋性文字、不完整的 JSON 符號、思考過程標籤
+            if any(keyword in smiles.lower() for keyword in [
+                "selected_action_names", "reasoning", "confidence",
+                "thought", "thinking", "explanation", "here are", "i will",
+                "json", "```", "```json"
+            ]):
+                return False
+
+            # 4. 檢查是否包含非SMILES字符 (簡化版，不包含所有有效SMILES字符)
+            if not re.fullmatch(r'[a-zA-Z0-9\(\)\[\]\-=#$@:./\\+]+', smiles):
                 return False
 
             return True

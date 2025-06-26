@@ -6,7 +6,7 @@ import logging
 import json
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
-
+import re
 logger = logging.getLogger(__name__)
 
 @dataclass
@@ -187,17 +187,20 @@ Your response:"""
     def _parse_llm_response(self, llm_response: str, available_actions: List[Dict[str, Any]]) -> ActionSelectionResponse:
         """Parse LLM response and extract selected actions"""
         try:
-            # Try to extract JSON from response
+            # 使用正則表達式更健壯地提取 JSON 塊
             response_text = llm_response.strip()
+            json_text = ""
             
-            # Find JSON block in response
-            start_idx = response_text.find('{')
-            end_idx = response_text.rfind('}') + 1
-            
-            if start_idx == -1 or end_idx == 0:
-                raise ValueError("No JSON found in LLM response")
-            
-            json_text = response_text[start_idx:end_idx]
+            # 1. 嘗試用正則表達式尋找 JSON 塊
+            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
+
+            if json_match:
+                json_text = json_match.group(0)
+            else:
+                # 2. 如果找不到，假設整個回應都是 JSON
+                logger.warning("No JSON block found with regex, attempting to parse the whole response.")
+                json_text = response_text
+
             response_data = json.loads(json_text)
             
             # Extract selected action names
@@ -226,7 +229,7 @@ Your response:"""
                 fallback_used=False
             )
             
-        except Exception as e:
+        except (json.JSONDecodeError, ValueError) as e:
             logger.error(f"Error parsing LLM response: {e}")
             logger.debug(f"Raw LLM response: {llm_response}")
             

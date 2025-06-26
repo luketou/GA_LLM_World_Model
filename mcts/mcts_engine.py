@@ -385,14 +385,12 @@ class MCTSEngine:
             return None
 
         # 過濾掉與父節點相同的子節點
-        valid_children = {smiles: child for smiles, child in parent_node.children.items() 
-                         if smiles != parent_smiles}
-        
-        if not valid_children:
+        # 確保不會選擇與父節點相同的分子
+        valid_children = {s: c for s, c in parent_node.children.items() if s != parent_smiles}
+
+        if not valid_children: # 如果所有子節點都與父節點相同，或者沒有子節點
             logger.warning(f"All children are identical to parent for {parent_smiles}")
-            # 如果所有子節點都相同，隨機選擇一個並警告
-            child_smiles = next(iter(parent_node.children.keys()))
-            return parent_node.children[child_smiles]
+            return None # 返回 None，讓 MCTS 引擎回溯
 
         # 臨時替換 children 進行選擇
         original_children = parent_node.children
