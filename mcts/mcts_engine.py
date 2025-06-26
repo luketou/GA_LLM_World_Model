@@ -423,6 +423,38 @@ class MCTSEngine:
         finally:
             # 恢復原始 children
             parent_node.children = original_children
+
+    def select_node_for_expansion(self) -> Optional[Node]:
+        """
+        從根節點開始，使用 UCT 策略選擇一個節點進行擴展。
+        這實現了 MCTS 的「選擇」階段，確保能夠回溯並探索整個樹。
+        """
+        if not self.root:
+            logger.error("MCTS Engine has no root node. Cannot select node for expansion.")
+            return None
+
+        logger.info("Starting MCTS selection phase from root...")
+
+        if self.uct_selector and hasattr(self.uct_selector, 'select_path_to_leaf'):
+            # 使用 UCTSelector 中的 select_path_to_leaf 方法，這是標準的 MCTS 選擇實現
+            selected_node = self.uct_selector.select_path_to_leaf(self.root, self.max_depth)
+            
+            if selected_node:
+                logger.info(f"MCTS selection phase complete. Selected node for expansion: {selected_node.smiles[:50]}... at depth {selected_node.depth}")
+            else:
+                logger.warning("UCT selection returned no node. Falling back to root.")
+                selected_node = self.root
+
+            return selected_node
+        else:
+            logger.warning("UCTSelector or select_path_to_leaf not available. Falling back to simple traversal.")
+            # 後備：一個簡化的、非 UCT 的遍歷，僅用於保持流程運行
+            current = self.root
+            while current.has_children():
+                # 選擇分數最高的子節點作為簡化策略
+                best_child = SearchStrategies.select_best_child_by_score(current)
+                current = best_child if best_child else current
+            return current
     
     def update_batch(self, parent_smiles: str, batch_smiles: List[str], 
                     scores: List[float], advantages: List[float]):

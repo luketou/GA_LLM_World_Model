@@ -2,14 +2,10 @@
 
 基於遺傳算法(GA)和大語言模型(LLM)的分子世界模型，用於藥物分子設計和優化。
 
-## 🔧 最新修復 (v1.2.1)
-
-### 關鍵問題修復
-- **修正早停條件錯誤**: 早停判斷現在基於正確的 `oracle_score` 而非錯誤的 `total_score`
-- **修正最佳分子選擇**: 最佳分子選擇現在使用 Oracle 的原始評分而非累積平均分
-- **添加 Oracle 分數追蹤**: Node 類新增 `oracle_score` 屬性，正確存儲 Oracle 評分
-- **修正語法錯誤**: 修復 workflow_graph.py 中的語法問題
-- **增強分數輸出**: 最終結果同時顯示 Oracle 分數和總分數，便於調試
+### v1.2.2 (最新版本)
+- 🚀 **MCTS 搜索策略增強**: 實現從根節點開始的完整 MCTS 選擇階段 (UCT`select_node_for_expansion`)解決過早終止和無法回溯探索的問題。
+- 🔧 **MCTS 數據一致性修復**: 修正 MCTS 節點統計數據重複更新的 Bug，確保 UCT 計算的準確性。
+- 💡 **LLM 引導動作選擇啟用**: 成功啟用 LLM 軌跡感知動作選擇功能，LLM 現在會被調用以輔助動作決策 (儘管 LLM 回應格式仍需優化)。
 
 ### 核心改進
 1. **正確的分數基準**: 所有關鍵決策(早停、最佳選擇)現在基於 Oracle 的原始評分
@@ -104,7 +100,7 @@ llm:
   provider: "github"           # "github" 或 "cerebras"
   model_name: "qwen-3-32b"    # 模型名稱
   temperature: 0.2             # 創造性控制
-  max_completion_tokens: 8192  # 最大輸出長度
+  max_completion_tokens: 4000  # 最大輸出長度
   max_smiles_length: 100       # SMILES 長度限制
 ```
 
