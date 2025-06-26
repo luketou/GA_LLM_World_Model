@@ -496,34 +496,25 @@ class MCTSEngine:
         
         updated_count = 0
         
+        # 註：子節點的更新（包括分數和訪問次數）已在 workflow_graph.py 的
+        # `update_stores` 節點中完成。此處 backpropagate 的職責是將分數向上傳播給祖先。
+        
         try:
-            # 更新所有子節點
-            for smiles, score in zip(batch_smiles, scores):
-                node = self.nodes.get(smiles)
-                if node:
-                    node.update(score)
-                    
-                    # 更新最佳節點 - 使用 oracle_score 而非 avg_score
-                    if not self.best or score > getattr(self.best, 'oracle_score', 0.0):
-                        self.best = node
-                        logger.info(f"New best node: {smiles} with oracle_score {score:.4f}")
-                    
-                    updated_count += 1
-                else:
-                    logger.warning(f"Node not found for SMILES: {smiles}")
-            
             # 向上傳播到祖先節點
             for smiles in batch_smiles:
                 node = self.nodes.get(smiles)
                 if node and node.parent:
                     self._propagate_to_ancestors(node)
+                    updated_count += 1
+                elif not node:
+                    logger.warning(f"Node not found for SMILES during backpropagation: {smiles}")
                     
         except Exception as e:
             logger.error(f"Error during backpropagation: {e}")
             import traceback
             logger.error(traceback.format_exc())
         
-        logger.info(f"Backpropagation complete: updated {updated_count}/{len(batch_smiles)} nodes")
+        logger.info(f"Backpropagation complete: propagated scores for {updated_count}/{len(batch_smiles)} nodes to their ancestors")
     
     def get_best_node(self) -> Optional[Node]:
         """獲取最佳節點 - 使用 TreeAnalytics 或後備方案"""

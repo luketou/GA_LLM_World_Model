@@ -73,7 +73,7 @@ def test_llm_guided_selector():
         
         # Mock LLM generator
         class MockLLMGenerator:
-            def generate_text(self, prompt):
+            def generate_text_response(self, prompt):
                 return '''
                 {
                   "selected_action_names": ["add_hydroxyl", "add_methyl"],
@@ -149,7 +149,7 @@ def test_integration():
             pass
         
         class MockLLMGenerator:
-            def generate_text(self, prompt):
+            def generate_text_response(self, prompt):
                 return '{"selected_action_names": ["add_methyl"], "reasoning": "Test reasoning", "confidence": 0.7}'
             
             def generate_batch(self, parent_smiles, actions):

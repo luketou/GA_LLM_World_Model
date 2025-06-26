@@ -258,6 +258,26 @@ class LLMGenerator:
             logger.error(f"Error extracting SMILES from response: {e}")
             return []
 
+    @traceable(name="LLMGenerator::generate_text")
+    def generate_text_response(self, prompt: str) -> str:
+        """
+        通用文本生成 - 用於需要文字回覆的任務，例如動作選擇的推理。
+        這個方法會將單一的 prompt 字符串轉換為 client 需要的 messages 格式。
+
+        Args:
+            prompt: 發送給 LLM 的完整提示字符串。
+
+        Returns:
+            LLM 生成的文字回覆。
+        """
+        messages = [{"role": "user", "content": prompt}]
+        try:
+            content = self.client.generate(messages)
+            return content
+        except Exception as e:
+            logger.error(f"Error in generate_text_response: {e}")
+            return '{"error": "LLM generation failed", "reasoning": "An error occurred during LLM text generation."}'
+
     def generate_simple_variation(self, parent_smiles: str, index: int) -> str:
         """
         生成簡單的分子變體，確保唯一性
