@@ -175,12 +175,8 @@ Your response:"""
     def _query_llm_for_selection(self, prompt: str) -> str:
         """Query LLM for action selection"""
         try:
-            # Use the existing LLM generator's generate method
-            if hasattr(self.llm_gen, 'generate_text'):
-                response = self.llm_gen.generate_text(prompt)
-            else:
-                # Fallback to generate method if generate_text doesn't exist
-                response = self.llm_gen.generate(prompt)
+            # Use the new generate_text_response method for general text generation
+            response = self.llm_gen.generate_text_response(prompt)
             
             return response
             

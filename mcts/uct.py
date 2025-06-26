@@ -159,10 +159,8 @@ class UCTSelector:
             """
             
             # 調用 LLM 進行多樣性分析
-            response = self.llm_gen.generate_single(
-                parent_smiles="",  # 不需要父分子
-                action={"type": "diversity_analysis", "prompt": prompt}
-            )
+            response = self.llm_gen.generate_text_response(prompt)
+            
             
             # 提取數字分數
             diversity_score = self._extract_score_from_response(response)

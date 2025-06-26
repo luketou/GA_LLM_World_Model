@@ -29,36 +29,16 @@ def env_var_constructor(loader, node):
 # 註冊自定義構造器
 yaml.SafeLoader.add_constructor('!ENV', env_var_constructor)
 
-# 載入配置
-cfg = yaml.safe_load(pathlib.Path("config/settings.yml").read_text())
+# Global placeholders for components that will be initialized later.
+# This prevents eager initialization at module import time.
+cfg = None
+kg = None
+oracle = None
+llm_gen = None
+engine = None
+MAX_SMILES_LENGTH = 100  # Default, will be updated by create_workflow_components
 
-# 從配置獲取 SMILES 長度限制
-MAX_SMILES_LENGTH = cfg.get("workflow", {}).get("max_smiles_length", 100)
-
-# 設定 LangSmith 環境變數（如果尚未設定）
-if cfg.get("langsmith", {}).get("enabled", False) and not os.environ.get("LANGSMITH_API_KEY"):
-    langsmith_config = cfg["langsmith"]
-    os.environ["LANGSMITH_TRACING"] = str(langsmith_config.get("tracing", True)).lower()
-    os.environ["LANGSMITH_ENDPOINT"] = langsmith_config.get("endpoint", "https://api.smith.langchain.com")
-    os.environ["LANGSMITH_API_KEY"] = langsmith_config.get("api_key", "")
-    os.environ["LANGSMITH_PROJECT"] = langsmith_config.get("project", "world model agent")
-    logger.info(f"LangSmith tracing enabled for project: {langsmith_config.get('project', 'world model agent')}")
-
-# 設定 API 金鑰（根據選擇的 provider）
-llm_config = cfg.get("llm", {})
-provider = llm_config.get("provider", "cerebras")
-
-if provider == "github":
-    # 設定 GitHub API 金鑰
-    github_api_key = llm_config.get("github_api_key")
-    if github_api_key and not os.environ.get("GITHUB_TOKEN"):
-        os.environ["GITHUB_TOKEN"] = github_api_key
-        logger.info("GitHub API key loaded from settings.yml")
-elif provider == "cerebras":
-    # 設定 Cerebras API 金鑰
-    if llm_config.get("api_key") and not os.environ.get("CEREBRAS_API_KEY"):
-        os.environ["CEREBRAS_API_KEY"] = llm_config.get("api_key")
-        logger.info("Cerebras API key loaded from settings.yml")
+graph_app = None # Placeholder for the compiled graph
 
 from oracle.guacamol_client import GuacaMolOracle
 from llm.generator import LLMGenerator
@@ -77,35 +57,6 @@ class AgentState:
     result: Dict[str, Any] = field(default_factory=dict)
 
 # ---------- init objects ----------
-kg = create_kg_store(KGConfig(**cfg["kg"]))
-oracle = GuacaMolOracle(cfg["TASK_NAME"])
-
-# 初始化 LLM Generator，從配置檔案讀取所有參數
-llm_config = cfg.get("llm", {}).copy()
-
-# 根據 provider 選擇正確的模型名稱和 API 金鑰
-provider = llm_config.get("provider", "cerebras")
-if provider == "github":
-    model_name = llm_config.get("github_model_name", "openai/gpt-4.1")
-    api_key = llm_config.get("github_api_key")
-else:
-    model_name = llm_config.get("model_name", "qwen-3-32b")
-    api_key = llm_config.get("api_key")
-
-# 確保所有必要的參數都被傳遞，並設置正確的參數名稱
-llm_gen = LLMGenerator(
-    provider=provider,
-    model_name=model_name,
-    temperature=llm_config.get("temperature", 0.2),
-    max_completion_tokens=llm_config.get("max_completion_tokens", 8192),
-    max_smiles_length=llm_config.get("max_smiles_length", MAX_SMILES_LENGTH),
-    top_p=llm_config.get("top_p", 1.0),
-    stream=llm_config.get("stream", False),  # 暫時關閉 stream
-    api_key=api_key
-)
-
-engine = MCTSEngine(kg, cfg["max_depth"], llm_gen=llm_gen)
-
 # ---------- nodes ----------
 @traceable
 def generate_actions(state: AgentState):
@@ -114,31 +65,31 @@ def generate_actions(state: AgentState):
         # 創建根節點（種子分子）
         root_node = engine._get_or_create_node(state.parent_smiles, 0)
         engine.root = root_node
-        print(f"[Debug] Created root node: {state.parent_smiles}")
+        logger.debug(f"Created root node: {state.parent_smiles}")
     
     state.actions = engine.propose_actions(state.parent_smiles,
                                            state.depth,
                                            cfg["K_init"])
-    print(f"[Debug] Generated {len(state.actions)} actions for {state.parent_smiles}")
+    logger.debug(f"Generated {len(state.actions)} actions for {state.parent_smiles}")
     return state
 
 @traceable
 def llm_generate(state: AgentState):
-    print(f"[Debug] LLM generating for {state.parent_smiles} with {len(state.actions)} actions")
+    logger.debug(f"LLM generating for {state.parent_smiles} with {len(state.actions)} actions")
     state.batch_smiles = llm_gen.generate_batch(state.parent_smiles,
                                                 state.actions)
-    print(f"[Debug] LLM generated {len(state.batch_smiles)} SMILES")
+    logger.debug(f"LLM generated {len(state.batch_smiles)} SMILES")
     return state
 
 @traceable
 async def oracle_score(state: AgentState):
     """Oracle 評分節點（異步）"""
-    print(f"[Debug] Oracle scoring {len(state.batch_smiles)} SMILES")
+    logger.debug(f"Oracle scoring {len(state.batch_smiles)} SMILES")
     
     if not state.batch_smiles:
         logger.warning("No SMILES to score")
         state.scores = []
-        print(f"[Debug] No SMILES to score, continuing with empty scores")
+        logger.debug("No SMILES to score, continuing with empty scores")
         return state
     
     # 過濾掉過長的 SMILES
@@ -150,12 +101,12 @@ async def oracle_score(state: AgentState):
             filtered_smiles.append(smiles)
             filtered_indices.append(i)
         else:
-            print(f"[Debug] Filtering out long SMILES (length: {len(smiles)}): {smiles[:50]}...")
+            logger.debug(f"Filtering out long SMILES (length: {len(smiles)}): {smiles[:50]}...")
     
     if not filtered_smiles:
         logger.warning("All SMILES were filtered out due to length constraints")
         state.scores = []
-        print(f"[Debug] All SMILES filtered out, continuing with empty scores")
+        logger.debug("All SMILES filtered out, continuing with empty scores")
         return state
     
     # 如果有SMILES被過濾掉，需要調整相關列表
@@ -174,7 +125,7 @@ async def oracle_score(state: AgentState):
     if not unique_smiles:
         logger.warning("No unique SMILES to score.")
         state.scores = []
-        print(f"[Debug] No unique SMILES to score, continuing with empty scores")
+        logger.debug("No unique SMILES to score, continuing with empty scores")
         return state
     
     try:
@@ -184,24 +135,24 @@ async def oracle_score(state: AgentState):
         score_map = {smile: score for smile, score in zip(unique_smiles, scores)}
         state.scores = [score_map[smile] for smile in state.batch_smiles]
         
-        print(f"[Debug] Oracle returned scores: {state.scores}")
-        print(f"[Debug] Oracle calls remaining: {oracle.calls_left}")
+        logger.debug(f"Oracle returned scores: {state.scores}")
+        logger.debug(f"Oracle calls remaining: {oracle.calls_left}")
     except Exception as e:
         logger.error(f"Oracle scoring failed: {e}")
         # 提供默認分數以避免工作流停止
         state.scores = [0.0] * len(state.batch_smiles)
-        print(f"[Debug] Using default scores: {state.scores}")
+        logger.debug(f"Using default scores: {state.scores}")
     
-    print(f"[Debug] Oracle scoring complete, proceeding to next node")
+    logger.debug("Oracle scoring complete, proceeding to next node")
     return state
 
 @traceable
 def compute_adv(state: AgentState):
-    print(f"[Debug] Computing advantages for {len(state.scores)} scores")
+    logger.debug(f"Computing advantages for {len(state.scores)} scores")
     import numpy as np
     baseline = float(np.mean(state.scores)) if state.scores else 0.0
     state.advantages = [s-baseline for s in state.scores]
-    print(f"[Debug] Baseline: {baseline:.6f}, advantages computed")
+    logger.debug(f"Baseline: {baseline:.6f}, advantages computed")
     # engine.update_batch moved to update_stores node
     return state
 
@@ -211,12 +162,12 @@ def expand_node(state: AgentState):
     擴展 MCTS 樹：創建新的子節點結構，並記錄生成動作
     職責：純粹的樹結構擴展，包含動作歷史追蹤
     """
-    print(f"[Debug] Expanding tree from parent {state.parent_smiles} with {len(state.batch_smiles)} potential children")
+    logger.debug(f"Expanding tree from parent {state.parent_smiles} with {len(state.batch_smiles)} potential children")
     
     # 確保父節點存在
     if not engine.has_node(state.parent_smiles):
-        parent_node = engine.get_or_create_node(state.parent_smiles, state.depth)
-        print(f"[Debug] Created missing parent node: {state.parent_smiles}")
+        parent_node = engine._get_or_create_node(state.parent_smiles, state.depth)
+        logger.debug(f"Created missing parent node: {state.parent_smiles}")
     else:
         parent_node = engine.get_node(state.parent_smiles)
     
@@ -238,9 +189,9 @@ def expand_node(state: AgentState):
             engine.nodes[child_smiles] = child_node
             new_children_count += 1
             
-            print(f"[Debug] Created child {child_smiles[:30]}... with action: {generating_action.get('name', 'Unknown') if generating_action else 'None'}")
+            logger.debug(f"Created child {child_smiles[:30]}... with action: {generating_action.get('name', 'Unknown') if generating_action else 'None'}")
     
-    print(f"[Debug] Expansion complete: {new_children_count} new children added, parent now has {len(parent_node.children)} total children")
+    logger.debug(f"Expansion complete: {new_children_count} new children added, parent now has {len(parent_node.children)} total children")
     return state
 
 @traceable
@@ -249,11 +200,11 @@ def update_stores(state: AgentState):
     更新存儲：專注於反向傳播和知識圖譜更新
     職責：分數傳播 + 數據持久化
     """
-    print(f"[Debug] UpdateStores: Backpropagating scores for {len(state.batch_smiles)} molecules")
+    logger.debug(f"UpdateStores: Backpropagating scores for {len(state.batch_smiles)} molecules")
     
     # 數據完整性檢查
     if not all([hasattr(state, attr) and getattr(state, attr) for attr in ['batch_smiles', 'scores', 'advantages']]):
-        print("[Warning] Skipping stores update due to missing state data")
+        logger.warning("Skipping stores update due to missing state data")
         return state
         
     if not (len(state.batch_smiles) == len(state.scores) == len(state.advantages)):
@@ -267,7 +218,7 @@ def update_stores(state: AgentState):
 
     parent_node = engine.get_node(state.parent_smiles)
     if not parent_node:
-        print("[Error] Parent node not found during UpdateStores")
+        logger.error("Parent node not found during UpdateStores")
         return state
 
     # 1. 更新子節點分數和統計
@@ -281,7 +232,7 @@ def update_stores(state: AgentState):
             # 更新全局最佳 - 使用 oracle_score 而非 avg_score
             if not engine.best or score > getattr(engine.best, 'oracle_score', 0.0):
                 engine.best = child_node
-                print(f"[Debug] New best: {child_smiles[:30]}... oracle_score={score:.4f}")
+                logger.debug(f"New best: {child_smiles[:30]}... oracle_score={score:.4f}")
 
     # 2. 執行 MCTS 反向傳播
     engine.backpropagate(state.batch_smiles, state.scores)
@@ -306,15 +257,15 @@ def update_stores(state: AgentState):
                     score_delta=score
                 )
     except Exception as e:
-        print(f"[Debug] KG update error: {e}")
+        logger.debug(f"KG update error: {e}")
 
-    print(f"[Debug] UpdateStores complete: backpropagation finished, KG updated")
+    logger.debug("UpdateStores complete: backpropagation finished, KG updated")
     return state
 
 @traceable
 def decide(state: AgentState):
-    print(f"[Debug] Decide: current parent={state.parent_smiles}, depth={state.depth}")
-    print(f"[Debug] Oracle calls left: {oracle.calls_left}")
+    logger.debug(f"Decide: current parent={state.parent_smiles}, depth={state.depth}")
+    logger.debug(f"Oracle calls left: {oracle.calls_left}")
     
     # 動態樹修剪觰發器
     if not hasattr(engine, 'iteration_count'):
@@ -331,18 +282,18 @@ def decide(state: AgentState):
     )
     
     if should_prune and hasattr(engine, 'tree_manipulator'):
-        print(f"[Debug] Triggering tree pruning: iteration={engine.iteration_count}, tree_size={len(engine.nodes)}")
+        logger.debug(f"Triggering tree pruning: iteration={engine.iteration_count}, tree_size={len(engine.nodes)}")
         try:
             # 保留前 k 個最佳子樹
             keep_top_k = cfg.get("mcts", {}).get("keep_top_k", 100)
             pruned_count = engine.tree_manipulator.prune_tree_recursive(engine.root, keep_top_k)
-            print(f"[Debug] Pruning complete: removed {pruned_count} nodes, remaining: {len(engine.nodes)}")
+            logger.debug(f"Pruning complete: removed {pruned_count} nodes, remaining: {len(engine.nodes)}")
         except Exception as e:
-            print(f"[Debug] Tree pruning failed: {e}")
+            logger.debug(f"Tree pruning failed: {e}")
 
     # 主要終止條件：Oracle 預算用完
     if oracle.calls_left <= 0:
-        print("[Debug] Terminating: Oracle budget exhausted")
+        logger.info("Terminating: Oracle budget exhausted")
         state.result = {"best": engine.best, "reason": "Oracle budget exhausted"}
         return state
     
@@ -351,20 +302,20 @@ def decide(state: AgentState):
     if (hasattr(engine, 'best') and engine.best and 
         hasattr(engine.best, 'oracle_score') and 
         engine.best.oracle_score >= early_stop_threshold):
-        print(f"[Debug] Early stopping: Found high-score molecule (oracle_score: {engine.best.oracle_score:.4f} >= {early_stop_threshold})")
+        logger.info(f"Early stopping: Found high-score molecule (oracle_score: {engine.best.oracle_score:.4f} >= {early_stop_threshold})")
         state.result = {"best": engine.best, "reason": f"Early stop - high score ({engine.best.oracle_score:.4f})"}
         return state
     
     # 次要終止條件：達到最大深度
     if state.depth >= cfg["max_depth"]:
-        print("[Debug] Terminating: Max depth reached")
+        logger.info("Terminating: Max depth reached")
         state.result = {"best": engine.best, "reason": "Max depth reached"}
         return state
     
     # 安全性檢查：分子複雜度限制
     max_smiles_length = cfg.get("workflow", {}).get("max_smiles_length", 100)
     if len(state.parent_smiles) > max_smiles_length:
-        print(f"[Debug] Terminating: Molecule too complex (length: {len(state.parent_smiles)} > {max_smiles_length})")
+        logger.info(f"Terminating: Molecule too complex (length: {len(state.parent_smiles)} > {max_smiles_length})")
         state.result = {"best": engine.best, "reason": f"Molecule too complex (length: {len(state.parent_smiles)})"}
         return state
     
@@ -373,46 +324,40 @@ def decide(state: AgentState):
     if parent_node and parent_node.children:
         unique_children = set(parent_node.children.keys())
         if len(unique_children) == 1 and state.parent_smiles in unique_children:
-            print("[Debug] Terminating: LLM failed to generate diverse molecules")
+            logger.info("Terminating: LLM failed to generate diverse molecules")
             state.result = {"best": engine.best, "reason": "LLM generation failure - all molecules identical"}
             return state
     
     # 新增：迭代限制作為安全網
-    if hasattr(engine, 'iteration_count'):
-        engine.iteration_count += 1
-    else:
-        engine.iteration_count = 1
+    # This is now handled in run_workflow to avoid statefulness issues in the node.
     
     # 安全網：防止無限循環
-    if engine.iteration_count > 100:
-        print(f"[Debug] Terminating: Too many iterations ({engine.iteration_count})")
-        state.result = {"best": engine.best, "reason": f"Maximum iterations reached ({engine.iteration_count})"}
-        return state
+    # This is also handled in run_workflow.
     
     # 嘗試選擇下一個節點
     nxt = engine.select_child(state.parent_smiles)
     if not nxt:
-        print("[Debug] Terminating: No more children to explore")
+        logger.info("Terminating: No more children to explore")
         state.result = {"best": engine.best, "reason": "No more children to explore"}
         return state
     
     # 檢查下一個節點是否達到深度限制
     if nxt.depth >= cfg["max_depth"]:
-        print("[Debug] Terminating: Next node would exceed max depth")
+        logger.info("Terminating: Next node would exceed max depth")
         state.result = {"best": engine.best, "reason": "Next node would exceed max depth"}
         return state
     
     # 檢查是否選擇了相同的節點（避免死循環）
     if nxt.smiles == state.parent_smiles:
-        print("[Debug] Warning: Selected same molecule, incrementing depth")
+        logger.warning("Selected same molecule, incrementing depth")
         state.depth += 1
         if state.depth >= cfg["max_depth"]:
-            print("[Debug] Terminating: Forced depth increment exceeded max depth")
+            logger.info("Terminating: Forced depth increment exceeded max depth")
             state.result = {"best": engine.best, "reason": "Forced termination due to identical molecule selection"}
             return state
     else:
         # 更新狀態繼續探索
-        print(f"[Debug] Continuing: next parent={nxt.smiles[:50]}..., next depth={nxt.depth}")
+        logger.debug(f"Continuing: next parent={nxt.smiles[:50]}..., next depth={nxt.depth}")
         state.parent_smiles = nxt.smiles
         state.depth = nxt.depth
     
@@ -428,11 +373,11 @@ def should_continue(state: AgentState):
     判斷是否繼續工作流程
     """
     try:
-        print(f"[Debug] should_continue called, checking state...")
+        logger.debug("should_continue called, checking state...")
         
         # 檢查是否有結果（終止條件）
         if hasattr(state, 'result') and state.result:
-            print(f"[Debug] Found result: {state.result}")
+            logger.debug(f"Found result: {state.result}")
             logger.info("Workflow completed with result")
             return "end"
         
@@ -443,7 +388,7 @@ def should_continue(state: AgentState):
         
         # 檢查 Oracle 調用次數
         if oracle.calls_left <= 0:
-            print(f"[Debug] Oracle calls exhausted: {oracle.calls_left}")
+            logger.debug(f"Oracle calls exhausted: {oracle.calls_left}")
             logger.info("Oracle calls exhausted")
             return "end"
         
@@ -454,7 +399,7 @@ def should_continue(state: AgentState):
         
     except Exception as e:
         logger.error(f"Error in should_continue: {e}")
-        print(f"[Debug] Error in should_continue: {e}")
+        logger.debug(f"Error in should_continue: {e}")
         return "end"
 
 # ---------- LangGraph ----------
@@ -484,7 +429,7 @@ sg.add_conditional_edges(
 )
 
 # 直接編譯，不使用 checkpoint，並設置遞歸限制
-graph_app = sg.compile()
+# graph_app is compiled within create_workflow_components to use the correct configuration.
 
 # 設置執行配置
 async def run_workflow(initial_state):
@@ -515,15 +460,15 @@ async def run_workflow(initial_state):
                 logger.warning(f"Reached maximum iterations ({max_iterations}), stopping workflow")
                 break
                 
-            print(f"[Debug] Iteration {iteration}: {list(chunk.keys())}")
+            logger.debug(f"Iteration {iteration}: {list(chunk.keys())}")
             
             # 檢查每個節點的狀態
             for node_name, state in chunk.items():
-                print(f"[Debug] Node {node_name} completed")
+                logger.debug(f"Node {node_name} completed")
                 
                 # 檢查是否有終止結果
                 if hasattr(state, 'result') and state.result:
-                    print(f"[Debug] Found termination result in {node_name}: {state.result}")
+                    logger.debug(f"Found termination result in {node_name}: {state.result}")
                     final_result = state.result
                     return chunk  # 立即返回包含結果的 chunk
             
@@ -531,7 +476,7 @@ async def run_workflow(initial_state):
             
             # 檢查是否到達 END 狀態
             if END in chunk:
-                print(f"[Debug] Reached END state")
+                logger.debug("Reached END state")
                 return chunk
             
             # 添加小延遲以確保異步操作完成
@@ -564,13 +509,13 @@ async def run_workflow(initial_state):
                         "reason": reason
                     }
                     state.result = fallback_result
-                    print(f"[Debug] Fallback result: {fallback_result}")
+                    logger.debug(f"Fallback result: {fallback_result}")
                     break
                     
         return last_chunk
     except Exception as e:
         logger.error(f"Workflow failed at iteration {iteration}: {e}")
-        print(f"[Debug] Workflow exception: {e}")
+        logger.debug(f"Workflow exception: {e}")
         import traceback
         logger.error(traceback.format_exc())
         return None
@@ -580,7 +525,8 @@ __all__ = ['graph_app', 'AgentState', 'oracle', 'cfg', 'engine', 'run_workflow',
 
 def create_workflow_components(config):
     """
-    創建工作流程組件的工廠函數，供 main.py 使用
+    創建工作流程組件的工廠函數，供 main.py 使用。
+    此函數會初始化所有全局組件並編譯 LangGraph。
     
     Args:
         config: 配置字典
@@ -588,9 +534,20 @@ def create_workflow_components(config):
     Returns:
         tuple: (oracle, engine, graph_app)
     """
-    global cfg, oracle, engine, graph_app
+    global cfg, kg, oracle, llm_gen, engine, MAX_SMILES_LENGTH, graph_app
     cfg = config
     
+    # 設定 LangSmith 環境變數（如果尚未設定）
+    if cfg.get("langsmith", {}).get("enabled", False) and not os.environ.get("LANGSMITH_API_KEY"):
+        langsmith_config = cfg["langsmith"]
+        os.environ["LANGSMITH_TRACING"] = str(langsmith_config.get("tracing", True)).lower()
+        os.environ["LANGSMITH_ENDPOINT"] = langsmith_config.get("endpoint", "https://api.smith.langchain.com")
+        os.environ["LANGSMITH_API_KEY"] = langsmith_config.get("api_key", "")
+        os.environ["LANGSMITH_PROJECT"] = langsmith_config.get("project", "world model agent")
+        logger.info(f"LangSmith tracing enabled for project: {langsmith_config.get('project', 'world model agent')}")
+
+    MAX_SMILES_LENGTH = cfg.get("workflow", {}).get("max_smiles_length", 100)
+
     # 重新初始化組件以使用新配置
     kg = create_kg_store(KGConfig(**cfg["kg"]))
     oracle = GuacaMolOracle(cfg["TASK_NAME"])
@@ -618,5 +575,8 @@ def create_workflow_components(config):
     )
     
     engine = MCTSEngine(kg, cfg["max_depth"], llm_gen=llm_gen)
+    
+    # 編譯 LangGraph，確保它使用最新初始化的全局組件
+    graph_app = sg.compile()
     
     return oracle, engine, graph_app

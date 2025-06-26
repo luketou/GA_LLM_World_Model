@@ -102,7 +102,7 @@ class LLMGenerator:
         
         target_count = len(actions)
         valid_smiles = []
-        valid_smiles_set = set()
+        valid_smiles_set = set() # 用於去重
         total_attempts = 0
         max_total_attempts = max_retries * 3
         
@@ -111,7 +111,7 @@ class LLMGenerator:
         
         while len(valid_smiles) < target_count and total_attempts < max_total_attempts:
             total_attempts += 1
-            needed_count = target_count - len(valid_smiles)
+            needed_count = target_count - len(valid_smiles) # 每次嘗試需要補充的數量
             
             print(f"[LLM-DEBUG] Attempt {total_attempts}: Need {needed_count} more valid SMILES (have {len(valid_smiles)}/{target_count})")
             
@@ -127,13 +127,13 @@ class LLMGenerator:
                     # 後續使用最簡化提示
                     messages = create_fallback_prompt(parent_smiles, needed_count)
                 
-                print(f"[LLM-DEBUG] Calling {self.provider} API for {needed_count} SMILES...")
+                logger.debug(f"Calling {self.provider} API for {needed_count} SMILES...")
                 api_start = time.time()
                 
                 content = self.client.generate(messages)
                 
                 api_time = time.time() - api_start
-                print(f"[LLM-DEBUG] API call completed in {api_time:.2f}s")
+                logger.debug(f"API call completed in {api_time:.2f}s")
                 
                 # 使用新的提取方法解析 SMILES
                 new_smiles = self._extract_smiles_from_response(content)
@@ -142,22 +142,21 @@ class LLMGenerator:
                 for smiles in new_smiles:
                     if smiles not in valid_smiles_set and len(valid_smiles) < target_count:
                         valid_smiles.append(smiles)
-                        valid_smiles_set.add(smiles)
+                        valid_smiles_set.add(smiles) # 添加到集合中以確保唯一性
                 
-                print(f"[LLM-DEBUG] Added {len(new_smiles)} new valid SMILES in this attempt")
+                logger.debug(f"Added {len(new_smiles)} new valid SMILES in this attempt")
                 
                 # 如果這次嘗試沒有獲得任何有效分子，嘗試使用回退方法
                 if len(new_smiles) == 0:
-                    print(f"[LLM-DEBUG] No valid SMILES generated, using fallback methods")
+                    logger.debug("No valid SMILES generated, using fallback methods")
                     for fallback_attempt in range(min(needed_count, 3)):
                         fallback_smiles = self.fallback_smiles_generation(parent_smiles)
                         if fallback_smiles and fallback_smiles not in valid_smiles_set:
                             valid_smiles.append(fallback_smiles)
                             valid_smiles_set.add(fallback_smiles)
-                            print(f"[LLM-DEBUG] Added fallback SMILES #{fallback_attempt+1}: {fallback_smiles}")
+                            logger.debug(f"Added fallback SMILES #{fallback_attempt+1}: {fallback_smiles}")
                 
             except Exception as e:
-                print(f"[LLM-DEBUG] Error in attempt {total_attempts}: {e}")
                 logger.error(f"Error in generate_batch attempt {total_attempts}: {e}")
                 
                 # 錯誤時也嘗試生成一些回退分子
@@ -166,10 +165,10 @@ class LLMGenerator:
                     if fallback_smiles and fallback_smiles not in valid_smiles_set:
                         valid_smiles.append(fallback_smiles)
                         valid_smiles_set.add(fallback_smiles)
-        
+
         # 如果仍然不足，使用簡單分子填充
         if len(valid_smiles) < target_count:
-            print(f"[LLM-DEBUG] Still need {target_count - len(valid_smiles)} more SMILES, using simple molecules")
+            logger.debug(f"Still need {target_count - len(valid_smiles)} more SMILES, using simple molecules")
             simple_molecules = [
                 "CCO", "CCN", "CCC", "C=C", "c1ccccc1", "CC(C)C", 
                 "CCCC", "CNC", "COC", "C1CCCCC1", "CC=O", "CCO"
@@ -180,10 +179,10 @@ class LLMGenerator:
                     break
                 if simple_mol not in valid_smiles_set:
                     valid_smiles.append(simple_mol)
-                    valid_smiles_set.add(simple_mol)
-                    print(f"[LLM-DEBUG] Added simple molecule #{len(valid_smiles)}: {simple_mol}")
+                    valid_smiles_set.add(simple_mol) # 添加到集合中以確保唯一性
+                    logger.debug(f"Added simple molecule #{len(valid_smiles)}: {simple_mol}")
         
-        # 確保返回正確數量（截取或填充）
+        # 確保返回正確數量（截取或填充到目標數量）
         if len(valid_smiles) > target_count:
             valid_smiles = valid_smiles[:target_count]
         elif len(valid_smiles) < target_count:
@@ -196,12 +195,12 @@ class LLMGenerator:
                 else:
                     valid_smiles.append("CCO")  # 最終保證
         
-        total_time = time.time() - start_time
+        total_time = time.time() - start_time # 計算總耗時
         success_rate = len(valid_smiles) / target_count if target_count > 0 else 0
         
-        print(f"[LLM-DEBUG] generate_batch completed in {total_time:.2f}s")
-        print(f"[LLM-DEBUG] Final result: {len(valid_smiles)}/{target_count} SMILES (success rate: {success_rate:.2%})")
-        print(f"[LLM-DEBUG] Total API attempts: {total_attempts}")
+        logger.debug(f"generate_batch completed in {total_time:.2f}s")
+        logger.debug(f"Final result: {len(valid_smiles)}/{target_count} SMILES (success rate: {success_rate:.2%})")
+        logger.debug(f"Total API attempts: {total_attempts}")
         
         logger.info(f"Generated {len(valid_smiles)} SMILES from {target_count} actions in {total_attempts} attempts")
         
@@ -434,60 +433,22 @@ class LLMGenerator:
         """
         增強的 SMILES 驗證機制
         """
-        import time
-        start_time = time.time()
-        
+        # 根據架構原則，在 Oracle 評分前只進行輕量級驗證
+        # 避免使用 RDKit
         try:
-            # Quick checks first
-            if not smiles or len(smiles) < 2:
+            # 1. 基本的空值和長度檢查
+            if not smiles or not isinstance(smiles, str):
                 return False
             
-            # 檢查長度限制
-            if len(smiles) > self.max_smiles_length:
+            if len(smiles) > self.max_smiles_length or len(smiles) < 2:
                 return False
-            
-            # RDKit import and mol creation - potential bottleneck
-            rdkit_start = time.time()
-            from rdkit import Chem
-            from rdkit.Chem import rdMolDescriptors
-            
-            mol = Chem.MolFromSmiles(smiles)
-            if mol is None:
+
+            # 2. 檢查是否有不應存在的空格
+            if ' ' in smiles:
                 return False
-            rdkit_time = time.time() - rdkit_start
-            
-            # 檢查分子量 - expensive calculation
-            mw_start = time.time()
-            mw = rdMolDescriptors.CalcExactMolWt(mol)
-            if mw > 1000 or mw < 30:  # 合理的分子量範圍
-                return False
-            mw_time = time.time() - mw_start
-            
-            # 檢查原子數 - less expensive
-            atoms_start = time.time()
-            num_atoms = mol.GetNumAtoms()
-            if num_atoms > 100 or num_atoms < 2:
-                return False
-            atoms_time = time.time() - atoms_start
-            
-            # 檢查是否包含異常結構 - potentially expensive
-            struct_start = time.time()
-            if self.has_unusual_structures(mol):
-                return False
-            struct_time = time.time() - struct_start
-            
-            total_time = time.time() - start_time
-            if total_time > 0.1:  # Only log if validation takes > 100ms
-                print(f"[VALIDATION-DEBUG] SMILES validation took {total_time:.3f}s "
-                      f"(rdkit: {rdkit_time:.3f}s, mw: {mw_time:.3f}s, "
-                      f"atoms: {atoms_time:.3f}s, struct: {struct_time:.3f}s) for: {smiles[:30]}...")
-            
+
             return True
-            
         except Exception as e:
-            total_time = time.time() - start_time
-            if total_time > 0.05:  # Log errors that take time
-                print(f"[VALIDATION-DEBUG] SMILES validation failed in {total_time:.3f}s for '{smiles[:30]}...': {e}")
             logger.debug(f"SMILES validation failed for '{smiles}': {e}")
             return False
 
