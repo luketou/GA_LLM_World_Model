@@ -17,14 +17,27 @@ from typing import Optional, Dict, List
 logger = logging.getLogger(__name__)
 
 class UCTSelector:
-    """
-    增強的 UCT 選擇器，集成化學多樣性獎勵
-    """
-    
-    def __init__(self, c_uct: float = 1.414, diversity_weight: float = 0.1, llm_gen: Optional[LLMGenerator] = None):
+    """增強的 UCT 選擇器，集成化學多樣性獎勵並加入隨機探索"""
+
+    def __init__(
+        self,
+        c_uct: float = 1.414,
+        diversity_weight: float = 0.1,
+        llm_gen: Optional[LLMGenerator] = None,
+        epsilon: float = 0.1,
+    ) -> None:
+        """初始化
+
+        Args:
+            c_uct: UCT 探索常數
+            diversity_weight: 多樣性獎勵權重
+            llm_gen: 用於多樣性計算的 LLM 生成器
+            epsilon: 隨機探索比例
+        """
         self.c_uct = c_uct
         self.diversity_weight = diversity_weight
         self.llm_gen = llm_gen
+        self.epsilon = epsilon
         
     def select_best_child(self, parent: Node) -> Optional[Node]:
         """
@@ -34,21 +47,31 @@ class UCTSelector:
             logger.debug(f"No children found for {parent.smiles}")
             return None
             
+        import random
+
+        # epsilon-隨機選擇以避免搜尋陷入單一路徑
+        if random.random() < self.epsilon:
+            chosen = random.choice(list(parent.children.values()))
+            logger.debug(f"Epsilon random child selected: {chosen.smiles}")
+            return chosen
+
         best_child = None
         best_score = float('-inf')
-        
+
         for child_smiles, child in parent.children.items():
             uct_score = self.calculate_uct_score(child, parent)
-            
+
             logger.debug(f"Child {child.smiles}: UCT={uct_score:.4f}")
-            
+
             if uct_score > best_score:
                 best_score = uct_score
                 best_child = child
 
         if best_child:
-            logger.debug(f"Selected best child: {best_child.smiles} with UCT score: {best_score:.4f}")
-                
+            logger.debug(
+                f"Selected best child: {best_child.smiles} with UCT score: {best_score:.4f}"
+            )
+
         return best_child
     
     def calculate_uct_score(self, child: Node, parent: Node) -> float:

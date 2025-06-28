@@ -72,21 +72,32 @@ except ImportError as e:
 
 class MCTSEngine:
     """蒙地卡羅樹搜索引擎 - 使用外部 actions 模組"""
-    
-    def __init__(self, kg_store, max_depth: int, llm_gen, c_uct: float = 1.414):
-        """
-        初始化 MCTS 引擎
-        
+
+    def __init__(
+        self,
+        kg_store,
+        max_depth: int,
+        llm_gen,
+        c_uct: float = 1.414,
+        epsilon: float = 0.1,
+        propagation_decay: float = 0.9,
+    ) -> None:
+        """初始化 MCTS 引擎
+
         Args:
             kg_store: 知識圖譜存儲
             max_depth: 最大搜索深度
             llm_gen: LLM 生成器
             c_uct: UCT 探索常數
+            epsilon: UCT 隨機探索比例
+            propagation_decay: 反向傳播時對分數增益的衰減因子
         """
         self.kg = kg_store
         self.max_depth = max_depth
         self.llm_gen = llm_gen
         self.c_uct = c_uct
+        self.epsilon = epsilon
+        self.propagation_decay = propagation_decay
         
         # 使用字典存儲節點，key 為 SMILES 字符串
         self.nodes: Dict[str, Node] = {}
@@ -98,7 +109,11 @@ class MCTSEngine:
         # 初始化策略組件（如果可用）
         try:
             if UCTSelector:
-                self.uct_selector = UCTSelector(c_uct=c_uct)
+                self.uct_selector = UCTSelector(
+                    c_uct=c_uct,
+                    llm_gen=llm_gen,
+                    epsilon=epsilon,
+                )
             else:
                 self.uct_selector = None
                 
@@ -493,21 +508,20 @@ class MCTSEngine:
             return random.choice(list(parent_node.children.keys()))
     
     def _propagate_to_ancestors(self, node: Node):
-        """
-        將分數從指定節點向上傳播到所有祖先節點。
-        此方法更新祖先的 `visits` 和 `total_score`，但不改變其 `oracle_score`。
-        """
+        """將分數提升以衰減方式向祖先節點傳播"""
         if not node.parent:
             return
 
-        # The score to propagate is the one most recently added to the node.
-        # The node's oracle_score holds the raw score from the last evaluation.
-        score_to_propagate = node.oracle_score
-        
+        # 以分數提升為基礎向上傳播，並依據衰減因子逐層減弱
+        parent_score = node.parent.oracle_score if node.parent else 0.0
+        improvement = node.oracle_score - parent_score
+
         current = node.parent
+        decay = 1.0
         while current:
             current.visits += 1
-            current.total_score += score_to_propagate
+            current.total_score += improvement * decay
+            decay *= self.propagation_decay
             current = current.parent
 
     def backpropagate(self, batch_smiles: List[str], scores: List[float]):
