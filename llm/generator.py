@@ -19,9 +19,17 @@ from langsmith import traceable
 from .cerebras_client import CerebrasClient
 from .github_client import GitHubClient
 from .prompt import create_enhanced_llm_messages, create_simple_generation_prompt, create_fallback_prompt
+from utils.smiles_tools import get_pubchem_data_v2
 
 logger = logging.getLogger(__name__)
 
+# 新增 llm_logger 設定
+llm_logger = logging.getLogger("llm_logger")
+if not llm_logger.handlers:
+    llm_handler = logging.FileHandler("llm_log.json")
+    llm_handler.setFormatter(logging.Formatter('%(asctime)s - %(message)s'))
+    llm_logger.addHandler(llm_handler)
+    llm_logger.setLevel(logging.INFO)
 
 class LLMGenerator:
     """LLM 客戶端封裝 - 支援 GitHub 和 Cerebras"""
@@ -96,6 +104,17 @@ class LLMGenerator:
         start_time = time.time()
         logger.debug(f"[LLM-DEBUG] Starting generate_batch with {len(actions)} actions")
         
+        # LLM input log
+        try:
+            llm_logger.info(json.dumps({
+                "type": "input",
+                "provider": self.provider,
+                "parent_smiles": parent_smiles,
+                "actions": actions
+            }, ensure_ascii=False))
+        except Exception as e:
+            logger.debug(f"Failed to log LLM input: {e}")
+        
         if not actions:
             logger.warning("No actions provided for generation")
             return []
@@ -106,8 +125,8 @@ class LLMGenerator:
         total_attempts = 0
         max_total_attempts = max_retries * 3
         
-        # 導入提示模板
-        from .prompt import create_enhanced_llm_messages, create_simple_generation_prompt, create_fallback_prompt
+        # PubChem RAG: 查詢 parent_smiles 的 PubChem 資訊
+        parent_pubchem_data = get_pubchem_data_v2(parent_smiles)
         
         while len(valid_smiles) < target_count and total_attempts < max_total_attempts:
             total_attempts += 1
@@ -119,18 +138,31 @@ class LLMGenerator:
                 # 根據嘗試次數選擇不同的提示策略
                 if total_attempts <= 2:
                     # 前兩次使用增強提示
-                    messages = create_enhanced_llm_messages(parent_smiles, actions)
+                    messages = create_enhanced_llm_messages(parent_smiles, actions, pubchem_data=parent_pubchem_data)
                 elif total_attempts <= 4:
                     # 第3-4次使用簡單提示
-                    messages = create_simple_generation_prompt(parent_smiles, needed_count)
+                    messages = create_simple_generation_prompt(parent_smiles, needed_count, pubchem_data=parent_pubchem_data)
                 else:
                     # 後續使用最簡化提示
-                    messages = create_fallback_prompt(parent_smiles, needed_count)
+                    messages = create_fallback_prompt(parent_smiles, needed_count, pubchem_data=parent_pubchem_data)
                 
                 logger.debug(f"Calling {self.provider} API for {needed_count} SMILES...")
                 api_start = time.time()
                 
                 content = self.client.generate(messages)
+                
+                # LLM output log
+                try:
+                    llm_logger.info(json.dumps({
+                        "type": "output",
+                        "provider": self.provider,
+                        "parent_smiles": parent_smiles,
+                        "actions": actions,
+                        "messages": messages,
+                        "response": content
+                    }, ensure_ascii=False))
+                except Exception as e:
+                    logger.debug(f"Failed to log LLM output: {e}")
                 
                 api_time = time.time() - api_start
                 logger.debug(f"API call completed in {api_time:.2f}s")
@@ -158,6 +190,18 @@ class LLMGenerator:
                 
             except Exception as e:
                 logger.error(f"Error in generate_batch attempt {total_attempts}: {e}")
+                # LLM error log
+                try:
+                    llm_logger.info(json.dumps({
+                        "type": "output",
+                        "provider": self.provider,
+                        "parent_smiles": parent_smiles,
+                        "actions": actions,
+                        "messages": messages if 'messages' in locals() else None,
+                        "response": f"Error: {e}"
+                    }, ensure_ascii=False))
+                except Exception as e2:
+                    logger.debug(f"Failed to log LLM error output: {e2}")
                 
                 # 錯誤時也嘗試生成一些回退分子
                 if len(valid_smiles) < target_count:
@@ -271,11 +315,40 @@ class LLMGenerator:
             LLM 生成的文字回覆。
         """
         messages = [{"role": "user", "content": prompt}]
+        # LLM input log
+        try:
+            llm_logger.info(json.dumps({
+                "type": "input",
+                "provider": self.provider,
+                "messages": messages
+            }, ensure_ascii=False))
+        except Exception as e:
+            logger.debug(f"Failed to log LLM input: {e}")
         try:
             content = self.client.generate(messages)
+            # LLM output log
+            try:
+                llm_logger.info(json.dumps({
+                    "type": "output",
+                    "provider": self.provider,
+                    "messages": messages,
+                    "response": content
+                }, ensure_ascii=False))
+            except Exception as e:
+                logger.debug(f"Failed to log LLM output: {e}")
             return content
         except Exception as e:
             logger.error(f"Error in generate_text_response: {e}")
+            # LLM error log
+            try:
+                llm_logger.info(json.dumps({
+                    "type": "output",
+                    "provider": self.provider,
+                    "messages": messages,
+                    "response": f"Error: {e}"
+                }, ensure_ascii=False))
+            except Exception as e2:
+                logger.debug(f"Failed to log LLM error output: {e2}")
             return '{"error": "LLM generation failed", "reasoning": "An error occurred during LLM text generation."}'
 
     def generate_simple_variation(self, parent_smiles: str, index: int) -> str:

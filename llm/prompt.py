@@ -50,20 +50,33 @@ Parent: {parent_smiles}
 Modifications: {modifications}
 Response:""")
 
-def create_enhanced_llm_messages(parent_smiles: str, actions: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+def format_pubchem_info(pubchem_data: dict) -> str:
     """
-    創建強化版 LLM 消息，使用 <SMILES></SMILES> token 標記
+    將 PubChem 查詢結果格式化為 LLM prompt 可讀字串
+    """
+    if not pubchem_data or 'error' in pubchem_data:
+        return "(No PubChem info found)"
+    lines = [
+        f"PubChem CID: {pubchem_data.get('cid', '-')}",
+        f"IUPAC Name: {pubchem_data.get('iupac_name', '-')}\nMolecular Formula: {pubchem_data.get('molecular_formula', '-')}\nMolecular Weight: {pubchem_data.get('molecular_weight', '-')}\nCanonical SMILES: {pubchem_data.get('canonical_smiles', '-')}\nXLogP: {pubchem_data.get('xlogp', '-')}\nH-bond Donor Count: {pubchem_data.get('h_bond_donor_count', '-')}\nH-bond Acceptor Count: {pubchem_data.get('h_bond_acceptor_count', '-')}\nPubChem URL: {pubchem_data.get('pubchem_url', '-')}"
+    ]
+    return '\n'.join(lines)
+
+def create_enhanced_llm_messages(parent_smiles: str, actions: List[Dict[str, Any]], pubchem_data: dict = None) -> List[Dict[str, str]]:
+    """
+    創建強化版 LLM 消息，使用 <SMILES></SMILES> token 標記，並可選擇加入 PubChem 資訊
     """
     if not actions:
         modifications = "Generate chemical variations"
     else:
         modifications = _create_clear_modifications_text(actions)
     
+    pubchem_info_block = f"\n\n[PubChem Information for Parent SMILES]\n{format_pubchem_info(pubchem_data)}" if pubchem_data else ""
     # 使用 Few-shot 範例
     user_prompt = FEW_SHOT_TEMPLATE.format(
         parent_smiles=parent_smiles,
         modifications=modifications
-    )
+    ) + pubchem_info_block
     
     return [
         {"role": "system", "content": ENHANCED_SYSTEM_TEMPLATE},
@@ -92,35 +105,28 @@ def _create_clear_modifications_text(actions: List[Dict[str, Any]]) -> str:
     
     return "; ".join(modifications[:10])  # 限制長度避免過度複雜
 
-def create_simple_generation_prompt(parent_smiles: str, num_variants: int = 5) -> List[Dict[str, str]]:
+def create_simple_generation_prompt(parent_smiles: str, num_variants: int = 5, pubchem_data: dict = None) -> List[Dict[str, str]]:
     """
-    創建簡單可靠的分子生成提示 - 使用token標記
+    創建簡單可靠的分子生成提示 - 使用token標記，並可選擇加入 PubChem 資訊
     """
-    system_prompt = f"""You are a SMILES generator. Generate {num_variants} valid SMILES variations.
-WRAP each SMILES with <SMILES></SMILES> tokens.
-One SMILES per line. NO other text allowed.
-
-EXAMPLE:
-<SMILES>CCO</SMILES>
-<SMILES>CCN</SMILES>"""
-    
-    user_prompt = f'Parent: {parent_smiles}\nGenerate {num_variants} variations:'
-    
+    system_prompt = f"""You are a SMILES generator. Generate {num_variants} valid SMILES variations.\nWRAP each SMILES with <SMILES></SMILES> tokens.\nOne SMILES per line. NO other text allowed.\n\nEXAMPLE:\n<SMILES>CCO</SMILES>\n<SMILES>CCN</SMILES>"""
+    pubchem_info_block = f"\n\n[PubChem Information for Parent SMILES]\n{format_pubchem_info(pubchem_data)}" if pubchem_data else ""
+    user_prompt = f'Parent: {parent_smiles}\nGenerate {num_variants} variations:' + pubchem_info_block
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
     ]
 
-def create_fallback_prompt(parent_smiles: str, num_variants: int = 5) -> List[Dict[str, str]]:
-    """創建最簡化的後備提示 - 使用token標記"""
+def create_fallback_prompt(parent_smiles: str, num_variants: int = 5, pubchem_data: dict = None) -> List[Dict[str, str]]:
+    """創建最簡化的後備提示 - 使用token標記，並可選擇加入 PubChem 資訊"""
+    pubchem_info_block = f"\n\n[PubChem Information for Parent SMILES]\n{format_pubchem_info(pubchem_data)}" if pubchem_data else ""
     return [
         {
             "role": "system", 
             "content": f"Generate {num_variants} valid SMILES. Use format: <SMILES>SMILES_STRING</SMILES>"
-            # Removed: + "\nYour entire response MUST be a valid JSON object, and nothing else."
         },
         {
             "role": "user", 
-            "content": f"{parent_smiles} -> variations"
+            "content": f"{parent_smiles} -> variations" + pubchem_info_block
         }
     ]

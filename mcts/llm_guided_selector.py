@@ -4,6 +4,7 @@ Enhanced action selection using historical trajectory context for trajectory-awa
 """
 import logging
 import json
+import time
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 import re
@@ -175,6 +176,9 @@ Your response:"""
     def _query_llm_for_selection(self, prompt: str) -> str:
         """Query LLM for action selection"""
         try:
+            # Proactively slow down requests to avoid 429 errors
+            time.sleep(1)
+            
             # Use the new generate_text_response method for general text generation
             response = self.llm_gen.generate_text_response(prompt)
             
@@ -187,19 +191,22 @@ Your response:"""
     def _parse_llm_response(self, llm_response: str, available_actions: List[Dict[str, Any]]) -> ActionSelectionResponse:
         """Parse LLM response and extract selected actions"""
         try:
-            # 使用正則表達式更健壯地提取 JSON 塊
             response_text = llm_response.strip()
             json_text = ""
             
-            # 1. 嘗試用正則表達式尋找 JSON 塊
-            json_match = re.search(r'\{.*\}', response_text, re.DOTALL)
-
+            # Method B: Robust JSON extraction
+            # 1. Try to find a JSON block enclosed in ```json ... ```
+            json_match = re.search(r"```json\s*(\{[\s\S]*?\})\s*```", response_text)
             if json_match:
-                json_text = json_match.group(0)
+                json_text = json_match.group(1)
             else:
-                # 2. 如果找不到，假設整個回應都是 JSON
-                logger.warning("No JSON block found with regex, attempting to parse the whole response.")
-                json_text = response_text
+                # 2. If not found, try to find the first '{' to the last '}'
+                json_match = re.search(r"\{[\s\S]*\}", response_text)
+                if json_match:
+                    json_text = json_match.group(0)
+                else:
+                    logger.warning("No JSON block found, attempting to parse the whole response.")
+                    json_text = response_text
 
             response_data = json.loads(json_text)
             

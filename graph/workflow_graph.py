@@ -335,7 +335,10 @@ def decide(state: AgentState):
     # This is also handled in run_workflow.
     
     # 嘗試選擇下一個節點
+    logger.debug(f"Before decide: parent_smiles={state.parent_smiles}")
     nxt = engine.select_node_for_expansion()
+    logger.debug(f"After decide: nxt.smiles = nxt={nxt.smiles if nxt else None}")
+    
     if not nxt:
         logger.info("Terminating: Could not select a node for expansion from the tree.")
         state.result = {"best": engine.best, "reason": "MCTS selection failed to find a node to expand."}

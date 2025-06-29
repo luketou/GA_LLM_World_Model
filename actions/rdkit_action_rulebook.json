@@ -1,0 +1,158 @@
+{
+    "swap_to_benzene": {
+      "type": "scaffold_swap",
+      "description": "將主骨架替換為苯環，保留原有取代基。",
+      "params": {
+        "old_scaffold_smarts": "c1[c,n,o,s]cccc1",
+        "new_scaffold_smiles": "c1ccccc1",
+        "new_attachment_indices_smarts": "[c:1]1[c:2][c:3][c:4][c:5][c:6]1"
+      }
+    },
+    "swap_to_pyridine": {
+      "type": "scaffold_swap",
+      "description": "將主骨架替換為吡啶環，保留原有取代基。",
+      "params": {
+        "old_scaffold_smarts": "c1ccccc1",
+        "new_scaffold_smiles": "c1cnccc1",
+        "new_attachment_indices_smarts": "[c:1]1[c:2][n:3][c:4][c:5][c:6]1"
+      }
+    },
+    "swap_to_pyrimidine": {
+      "type": "scaffold_swap",
+      "description": "將主骨架替換為嘧啶環，保留原有取代基。",
+      "params": {
+        "old_scaffold_smarts": "c1ccccc1",
+        "new_scaffold_smiles": "c1cncnc1",
+        "new_attachment_indices_smarts": "[c:1]1[c:2][n:3][c:4][n:5][c:6]1"
+      }
+    },
+    "swap_to_pyrazine": {
+      "type": "scaffold_swap",
+      "description": "將主骨架替換為吡嗪環，保留原有取代基。",
+      "params": {
+        "old_scaffold_smarts": "c1ccccc1",
+        "new_scaffold_smiles": "c1cnccn1",
+        "new_attachment_indices_smarts": "[c:1]1[c:2][n:3][c:4][c:5][n:6]1"
+      }
+    },
+    "swap_to_furan": {
+      "type": "scaffold_swap",
+      "description": "將主骨架替換為呋喃環，保留原有取代基。",
+      "params": {
+        "old_scaffold_smarts": "c1ccccc1",
+        "new_scaffold_smiles": "c1ccoc1",
+        "new_attachment_indices_smarts": "[c:1]1[c:2][c:3][o:4][c:5]1"
+      }
+    },
+    "swap_to_thiophene": {
+      "type": "scaffold_swap",
+      "description": "將主骨架替換為噻吩環，保留原有取代基。",
+      "params": {
+        "old_scaffold_smarts": "c1ccccc1",
+        "new_scaffold_smiles": "c1ccsc1",
+        "new_attachment_indices_smarts": "[c:1]1[c:2][c:3][s:4][c:5]1"
+      }
+    },
+    "add_hydroxyl_O": {
+      "type": "add_functional_group",
+      "description": "在分子上添加一個羥基 (-OH)。",
+      "params": {
+        "group_smiles": "O"
+      }
+    },
+    "add_carboxyl_C(=O)O": {
+      "type": "add_functional_group",
+      "description": "在分子上添加一個羧基 (-COOH)。",
+      "params": {
+        "group_smiles": "C(=O)O"
+      }
+    },
+    "add_amino_N": {
+      "type": "add_functional_group",
+      "description": "在分子上添加一個胺基 (-NH2)。",
+      "params": {
+        "group_smiles": "N"
+      }
+    },
+    "add_nitro_[N+](=O)[O-]": {
+      "type": "add_functional_group",
+      "description": "在分子上添加一個硝基 (-NO2)。",
+      "params": {
+        "group_smiles": "[N+](=O)[O-]"
+      }
+    },
+    "add_cyano_C#N": {
+      "type": "add_functional_group",
+      "description": "在分子上添加一個氰基 (-C#N)。",
+      "params": {
+        "group_smiles": "C#N"
+      }
+    },
+    "add_methyl_C": {
+      "type": "add_functional_group",
+      "description": "在分子上添加一個甲基 (-CH3)。",
+      "params": {
+        "group_smiles": "C"
+      }
+    },
+    "add_ethyl_CC": {
+      "type": "add_functional_group",
+      "description": "在分子上添加一個乙基 (-CH2CH3)。",
+      "params": {
+        "group_smiles": "CC"
+      }
+    },
+    "add_halogen_F": {
+      "type": "add_functional_group",
+      "description": "在分子上添加一個氟原子 (-F)。",
+      "params": {
+        "group_smiles": "F"
+      }
+    },
+    "add_halogen_Cl": {
+      "type": "add_functional_group",
+      "description": "在分子上添加一個氯原子 (-Cl)。",
+      "params": {
+        "group_smiles": "Cl"
+      }
+    },
+    "add_halogen_Br": {
+      "type": "add_functional_group",
+      "description": "在分子上添加一個溴原子 (-Br)。",
+      "params": {
+        "group_smiles": "Br"
+      }
+    },
+    "oxygen_to_nitrogen": {
+      "type": "heteroatom_exchange",
+      "description": "將分子中的一個氧原子替換為氮原子。",
+      "params": {
+        "from_atom": "o",
+        "to_atom": "n"
+      }
+    },
+    "nitrogen_to_oxygen": {
+      "type": "heteroatom_exchange",
+      "description": "將分子中的一個氮原子替換為氧原子。",
+      "params": {
+        "from_atom": "n",
+        "to_atom": "o"
+      }
+    },
+    "sulfur_to_oxygen": {
+      "type": "heteroatom_exchange",
+      "description": "將分子中的一個硫原子替換為氧原子。",
+      "params": {
+        "from_atom": "s",
+        "to_atom": "o"
+      }
+    },
+    "carbon_to_nitrogen": {
+      "type": "heteroatom_exchange",
+      "description": "將環中的一個碳原子替換為氮原子。",
+      "params": {
+        "from_atom": "c",
+        "to_atom": "n"
+      }
+    }
+  }

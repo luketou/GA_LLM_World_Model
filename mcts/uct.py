@@ -26,7 +26,7 @@ class UCTSelector:
         self.diversity_weight = diversity_weight
         self.llm_gen = llm_gen
         
-    def select_best_child(self, parent: Node) -> Optional[Node]:
+    def select_best_child(self, parent: Node, c_uct_override: Optional[float] = None) -> Optional[Node]:
         """
         使用增強的 UCT 分數選擇最佳子節點
         """
@@ -38,7 +38,7 @@ class UCTSelector:
         best_score = float('-inf')
         
         for child_smiles, child in parent.children.items():
-            uct_score = self.calculate_uct_score(child, parent)
+            uct_score = self.calculate_uct_score(child, parent, c_uct_override)
             
             logger.debug(f"Child {child.smiles}: UCT={uct_score:.4f}")
             
@@ -51,7 +51,7 @@ class UCTSelector:
                 
         return best_child
     
-    def calculate_uct_score(self, child: Node, parent: Node) -> float:
+    def calculate_uct_score(self, child: Node, parent: Node, c_uct_override: Optional[float] = None) -> float:
         """
         計算增強的 UCT 分數，包含多樣性獎勵
         """
@@ -63,10 +63,11 @@ class UCTSelector:
         exploitation = child.avg_score
         
         # 探索項 (Exploration)
+        c = c_uct_override if c_uct_override is not None else self.c_uct
         if parent.visits == 0:
             exploration = 0
         else:
-            exploration = self.c_uct * math.sqrt(math.log(parent.visits) / child.visits)
+            exploration = c * math.sqrt(math.log(parent.visits) / child.visits)
         
         # 基礎 UCT 分數
         uct_score = exploitation + exploration

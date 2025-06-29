@@ -61,13 +61,11 @@ except ImportError as e:
 
 # 導入 actions 模組
 try:
-    from actions import fine_actions
-    from actions import coarse_actions
+    from actions import action
     ACTIONS_AVAILABLE = True
 except ImportError as e:
-    logger.warning(f"Actions modules not available: {e}")
-    fine_actions = None
-    coarse_actions = None
+    logger.warning(f"Actions module not available: {e}")
+    action = None
     ACTIONS_AVAILABLE = False
 
 class MCTSEngine:
@@ -87,6 +85,9 @@ class MCTSEngine:
         self.max_depth = max_depth
         self.llm_gen = llm_gen
         self.c_uct = c_uct
+        # 動態探索常數，用於處理停滯
+        self.dynamic_c_uct = c_uct
+        self.stagnation_counter = 0
         
         # 使用字典存儲節點，key 為 SMILES 字符串
         self.nodes: Dict[str, Node] = {}
@@ -153,62 +154,17 @@ class MCTSEngine:
     
     def propose_actions(self, parent_smiles: str, depth: int, k_init: int) -> List[Dict[str, Any]]:
         """
-        提議動作列表 - 使用 LLM-guided 軌跡感知選擇或外部 actions 模組
-        
-        COMPLIANCE NOTE: This method delegates to external actions modules
-        which maintain strict compliance with Oracle evaluation constraints.
-        
-        Args:
-            parent_smiles: 父節點 SMILES
-            depth: 當前深度
-            k_init: 初始動作數量
-            
-        Returns:
-            List[Dict[str, Any]]: 動作列表
+        Propose actions using the unified action module.
         """
-        try:
-            logger.info(f"Proposing actions for {parent_smiles} at depth {depth}")
-            
-            # 確保父節點存在
-            if parent_smiles not in self.nodes:
-                self.get_or_create_node(parent_smiles, depth)
-            
-            # 獲取當前節點
-            current_node = self.nodes[parent_smiles]
-            
-            # 嘗試使用 LLM-guided trajectory-aware action selection
-            if self.llm_guided_selector and depth > 0:  # 只在非根節點使用
-                try:
-                    selected_actions = self._propose_actions_llm_guided(current_node, k_init)
-                    if selected_actions:
-                        logger.info(f"LLM-guided selector generated {len(selected_actions)} trajectory-aware actions")
-                        return selected_actions
-                    else:
-                        logger.warning("LLM-guided selector returned no actions, falling back to mixed actions")
-                except Exception as e:
-                    logger.warning(f"LLM-guided action selection failed: {e}, falling back to mixed actions")
-            
-            # 回退到原有的混合動作選擇
-            if ACTIONS_AVAILABLE and fine_actions:
-                # 使用 propose_mixed_actions 函數
-                actions = fine_actions.propose_mixed_actions(
-                    parent_smiles=parent_smiles,
-                    depth=depth,
-                    k_init=k_init
-                )
-                
-                logger.info(f"Generated {len(actions)} actions using external module")
-                return actions
-            else:
-                # 後備：使用內建的基本動作
-                logger.warning("External actions modules not available, using fallback actions")
-                return self._get_fallback_actions(parent_smiles, depth, k_init)
-                
-        except Exception as e:
-            logger.error(f"Error proposing actions for {parent_smiles}: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return self._get_fallback_actions(parent_smiles, depth, k_init)
+        if ACTIONS_AVAILABLE and action:
+            return action.propose_mixed_actions(
+                parent_smiles=parent_smiles,
+                depth=depth,
+                k_init=k_init
+            )
+        else:
+            logger.warning("Actions module not available, returning empty action list.")
+            return []
     
     def _propose_actions_llm_guided(self, current_node: Node, k_init: int) -> List[Dict[str, Any]]:
         """
@@ -225,9 +181,9 @@ class MCTSEngine:
             # 1. 獲取所有可用動作（使用現有的動作生成機制）
             available_actions = []
             
-            if ACTIONS_AVAILABLE and fine_actions:
+            if ACTIONS_AVAILABLE and action:
                 # 獲取混合動作作為候選池
-                available_actions = fine_actions.propose_mixed_actions(
+                available_actions = action.propose_mixed_actions(
                     parent_smiles=current_node.smiles,
                     depth=current_node.depth,
                     k_init=k_init * 3  # 獲取更多候選動作供LLM選擇
@@ -453,6 +409,20 @@ class MCTSEngine:
                 best_child = SearchStrategies.select_best_child_by_score(current)
                 current = best_child if best_child else current
             return current
+
+    def handle_stagnation(self, factor: float = 1.2, max_c: float = 5.0):
+        """當搜索停滯時增加探索因子"""
+        self.stagnation_counter += 1
+        # 每次停滯時，增加探索常數，但設有上限
+        self.dynamic_c_uct = min(self.dynamic_c_uct * factor, max_c)
+        logger.warning(f"Stagnation detected ({self.stagnation_counter} times). Increasing exploration to c_uct={self.dynamic_c_uct:.3f}")
+
+    def reset_stagnation(self):
+        """當搜索移動到新節點時重置探索因子"""
+        if self.stagnation_counter > 0:
+            logger.info("Stagnation resolved. Resetting exploration factor to default.")
+            self.stagnation_counter = 0
+            self.dynamic_c_uct = self.c_uct
     
     def update_batch(self, parent_smiles: str, batch_smiles: List[str], 
                     scores: List[float], advantages: List[float]):
