@@ -131,7 +131,7 @@ class MCTSEngine:
             self.progressive_widening = None
             self.llm_guided_selector = None
         
-        logger.info(f"MCTSEngine initialized with max_depth={max_depth}, c_uct={c_uct}")
+        logger.info(f"MCTSEngine initialized with max_depth={max_depth}, c_uct={self.c_uct}")
         logger.info(f"Actions modules available: {ACTIONS_AVAILABLE}")
         logger.info(f"LLM-guided selector available: {self.llm_guided_selector is not None}")
     
@@ -364,7 +364,7 @@ class MCTSEngine:
         try:
             # 使用 UCTSelector 進行選擇（如果可用）
             if self.uct_selector:
-                selected_child = self.uct_selector.select_best_child(parent_node)
+                selected_child = self.uct_selector.select_best_child(parent_node, c_uct_override=self.dynamic_c_uct)
                 if selected_child:
                     logger.debug(f"UCT selected child: {selected_child.smiles[:50]}...")
                     return selected_child
