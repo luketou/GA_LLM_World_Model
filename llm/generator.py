@@ -19,7 +19,7 @@ from langsmith import traceable
 from .cerebras_client import CerebrasClient
 from .github_client import GitHubClient
 from .prompt import create_enhanced_llm_messages, create_simple_generation_prompt, create_fallback_prompt
-from utils.smiles_tools import get_pubchem_data_v2
+from utils.smiles_tools import get_pubchem_data_v2, canonicalize
 
 logger = logging.getLogger(__name__)
 
@@ -264,9 +264,10 @@ class LLMGenerator:
             
             for match in matches:
                 smiles = match.strip()
-                if smiles and self.validate_smiles(smiles):
-                    smiles_list.append(smiles)
-                    logger.debug(f"[TOKEN-EXTRACT] Valid SMILES found: {smiles}")
+                canonical_smiles = canonicalize(smiles)
+                if canonical_smiles:
+                    smiles_list.append(canonical_smiles)
+                    logger.debug(f"[TOKEN-EXTRACT] Valid SMILES found: {canonical_smiles}")
                 else:
                     logger.debug(f"[TOKEN-EXTRACT] Invalid SMILES rejected: {smiles}")
             

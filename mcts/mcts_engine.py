@@ -6,6 +6,7 @@ MCTS Engine - 核心引擎
 """
 import logging
 from typing import Dict, List, Any, Optional
+from rdkit import Chem
 
 logger = logging.getLogger(__name__)
 
@@ -166,11 +167,24 @@ class MCTSEngine:
         Propose actions using the unified action module.
         """
         if ACTIONS_AVAILABLE and action:
-            return action.propose_mixed_actions(
-                    parent_smiles=parent_smiles,
-                    depth=depth,
-                    k_init=k_init
-                )
+            proposed_actions = action.propose_mixed_actions(
+                parent_smiles=parent_smiles,
+                depth=depth,
+                k_init=k_init
+            )
+            # Filter out invalid actions
+            mol = Chem.MolFromSmiles(parent_smiles)
+            if not mol:
+                return []
+
+            valid_actions = []
+            for act in proposed_actions:
+                if act['type'] == 'heteroatom_exchange':
+                    from_atom = act['params']['from_atom']
+                    if not mol.HasSubstructMatch(Chem.MolFromSmarts(f'[{from_atom}]')):
+                        continue
+                valid_actions.append(act)
+            return valid_actions
         else:
             logger.warning("Actions module not available, returning empty action list.")
             return []

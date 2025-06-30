@@ -364,17 +364,27 @@ def decide(state: AgentState):
     
     # 檢查是否選擇了相同的節點（避免死循環）
     if nxt.smiles == state.parent_smiles:
-        logger.warning("Selected same molecule, incrementing depth")
-        state.depth += 1
-        if state.depth >= cfg["max_depth"]:
-            logger.info("Terminating: Forced depth increment exceeded max depth")
-            state.result = {"best": engine.best, "reason": "Forced termination due to identical molecule selection"}
-            return state
+        if not hasattr(engine, 'stagnation_counter'):
+            engine.stagnation_counter = 0
+        engine.stagnation_counter += 1
+        logger.warning(f"Selected same molecule, incrementing stagnation counter to {engine.stagnation_counter}")
+
+        if engine.stagnation_counter > cfg.get("workflow", {}).get("stagnation_limit", 3):
+            logger.warning("Stagnation limit reached, forcing a random restart from a different node")
+            engine.stagnation_counter = 0
+            # 從樹中選擇一個訪問次數較少的節點
+            unexplored_nodes = [n for n in engine.nodes.values() if n.visits < 5 and n.depth < cfg["max_depth"]]
+            if unexplored_nodes:
+                nxt = random.choice(unexplored_nodes)
+                logger.info(f"Forced restart from node: {nxt.smiles}")
+            else:
+                # 如果沒有好的選擇，就從根節點開始
+                nxt = engine.root
+                logger.info("Forced restart from root")
+        else:
+            state.depth += 1
     else:
-        # 更新狀態繼續探索
-        logger.debug(f"Continuing: next parent={nxt.smiles[:50]}..., next depth={nxt.depth}")
-        state.parent_smiles = nxt.smiles
-        state.depth = nxt.depth
+        engine.stagnation_counter = 0 # 重置計數器
     
     # 清空之前的批次數據
     state.actions = []
