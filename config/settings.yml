@@ -51,7 +51,11 @@ llm:
   temperature: 0.2
   max_completion_tokens: 2048
   top_p: 1
-  stream: true
+  stream: false
+
+  vllm:
+    model_name: "Qwen/Qwen2-7B-Instruct-AWQ"
+    api_url: "http://localhost:8000/v1/chat/completions"
 
 # LangSmith 設定
 langsmith:

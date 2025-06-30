@@ -18,6 +18,7 @@ from typing import List, Dict, Any, Optional
 from langsmith import traceable
 from .cerebras_client import CerebrasClient
 from .github_client import GitHubClient
+from .vllm_client import VLLMClient
 from .prompt import create_enhanced_llm_messages, create_simple_generation_prompt, create_fallback_prompt
 from utils.smiles_tools import get_pubchem_data_v2, canonicalize
 
@@ -91,6 +92,15 @@ class LLMGenerator:
                 top_p=top_p,
                 stream=stream,
                 api_key=api_key
+            )
+        elif provider == "vllm":
+            self.client = VLLMClient(
+                model_name=model_name,
+                temperature=temperature,
+                max_completion_tokens=max_completion_tokens,
+                top_p=top_p,
+                stream=stream,
+                api_key="vllm" # Dummy key for local server
             )
         else:
             raise ValueError(f"Unsupported provider: {provider}")

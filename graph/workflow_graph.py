@@ -584,6 +584,9 @@ def create_workflow_components(config):
     if provider == "github":
         model_name = llm_config.get("github_model_name", "openai/gpt-4.1")
         api_key = llm_config.get("github_api_key")
+    elif provider == "vllm":
+        model_name = llm_config.get("model_name", "Qwen/Qwen3-30B-A3B")
+        api_key = "vllm"
     else:
         model_name = llm_config.get("model_name", "qwen-3-32b")
         api_key = llm_config.get("api_key")
