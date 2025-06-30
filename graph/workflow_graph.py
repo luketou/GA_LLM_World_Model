@@ -171,6 +171,18 @@ def expand_node(state: AgentState):
     else:
         parent_node = engine.get_node(state.parent_smiles)
     
+    # 過濾掉與 parent_smiles 相同的分子
+    filtered_batch = []
+    filtered_actions = []
+    for i, child_smiles in enumerate(state.batch_smiles):
+        if child_smiles != state.parent_smiles:
+            filtered_batch.append(child_smiles)
+            filtered_actions.append(state.actions[i] if i < len(state.actions) else None)
+        else:
+            logger.debug(f"Filtered identical child: {child_smiles}")
+    state.batch_smiles = filtered_batch
+    state.actions = filtered_actions
+    
     # 創建子節點結構（包含動作歷史）
     new_children_count = 0
     for i, child_smiles in enumerate(state.batch_smiles):

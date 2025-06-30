@@ -2,3 +2,5 @@ __pycache__/
 /log
 WM_agent.o*
 score_log.csv
+/pubchem_cache
+*.json

@@ -158,10 +158,10 @@ class MCTSEngine:
         """
         if ACTIONS_AVAILABLE and action:
             return action.propose_mixed_actions(
-                parent_smiles=parent_smiles,
-                depth=depth,
-                k_init=k_init
-            )
+                    parent_smiles=parent_smiles,
+                    depth=depth,
+                    k_init=k_init
+                )
         else:
             logger.warning("Actions module not available, returning empty action list.")
             return []
