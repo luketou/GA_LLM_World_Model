@@ -589,7 +589,7 @@ def create_workflow_components(config):
         api_key=api_key
     )
     
-    engine = MCTSEngine(kg, cfg["max_depth"], llm_gen=llm_gen)
+    engine = MCTSEngine(kg, cfg["max_depth"], llm_gen=llm_gen, config=cfg)
     
     # 編譯 LangGraph，確保它使用最新初始化的全局組件
     graph_app = sg.compile()

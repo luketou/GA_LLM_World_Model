@@ -71,7 +71,7 @@ except ImportError as e:
 class MCTSEngine:
     """蒙地卡羅樹搜索引擎 - 使用外部 actions 模組"""
     
-    def __init__(self, kg_store, max_depth: int, llm_gen, c_uct: float = 1.414):
+    def __init__(self, kg_store, max_depth: int, llm_gen, config: dict):
         """
         初始化 MCTS 引擎
         
@@ -79,14 +79,18 @@ class MCTSEngine:
             kg_store: 知識圖譜存儲
             max_depth: 最大搜索深度
             llm_gen: LLM 生成器
-            c_uct: UCT 探索常數
+            config: 全局配置字典
         """
         self.kg = kg_store
         self.max_depth = max_depth
         self.llm_gen = llm_gen
-        self.c_uct = c_uct
+        self.config = config  # 保存配置
+        
+        mcts_config = self.config.get("mcts", {})
+        self.c_uct = mcts_config.get("c_uct", 1.414)
+        
         # 動態探索常數，用於處理停滯
-        self.dynamic_c_uct = c_uct
+        self.dynamic_c_uct = self.c_uct
         self.stagnation_counter = 0
         
         # 使用字典存儲節點，key 為 SMILES 字符串
@@ -99,7 +103,12 @@ class MCTSEngine:
         # 初始化策略組件（如果可用）
         try:
             if UCTSelector:
-                self.uct_selector = UCTSelector(c_uct=c_uct)
+                self.uct_selector = UCTSelector(
+                    c_uct=self.c_uct,
+                    diversity_weight=mcts_config.get("diversity_weight", 0.1),
+                    visit_penalty=mcts_config.get("visit_penalty", 0.0),
+                    llm_gen=self.llm_gen
+                )
             else:
                 self.uct_selector = None
                 

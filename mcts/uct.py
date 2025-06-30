@@ -21,9 +21,10 @@ class UCTSelector:
     增強的 UCT 選擇器，集成化學多樣性獎勵
     """
     
-    def __init__(self, c_uct: float = 1.414, diversity_weight: float = 0.1, llm_gen: Optional[LLMGenerator] = None):
+    def __init__(self, c_uct: float = 1.414, diversity_weight: float = 0.1, visit_penalty: float = 0.0, llm_gen: Optional[LLMGenerator] = None):
         self.c_uct = c_uct
         self.diversity_weight = diversity_weight
+        self.visit_penalty = visit_penalty
         self.llm_gen = llm_gen
         
     def select_best_child(self, parent: Node, c_uct_override: Optional[float] = None) -> Optional[Node]:
@@ -75,12 +76,15 @@ class UCTSelector:
         # 多樣性獎勵 (基於 LLM 字符串分析)
         diversity_bonus = self._calculate_diversity_bonus(child, parent)
         
+        # 訪問懲罰
+        penalty = self.visit_penalty * child.visits
+        
         # 最終分數
-        final_score = uct_score + self.diversity_weight * diversity_bonus
+        final_score = uct_score + self.diversity_weight * diversity_bonus - penalty
         
         logger.debug(f"UCT: child={child.smiles[:20]}, exploitation={exploitation:.4f}, "
                     f"exploration={exploration:.4f}, diversity={diversity_bonus:.4f}, "
-                    f"final={final_score:.4f}")
+                    f"penalty={penalty:.4f}, final={final_score:.4f}")
         
         return final_score
     
