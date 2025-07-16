@@ -186,6 +186,40 @@ class GuacaMolOracle:
         idx_low = scores.index(min(scores))
         return smiles_all[idx_low], scores[idx_low]
 
+    def prescan_lowest_n(self, smi_file: str, n: int = 100) -> List[str]:
+        """Return ``n`` lowest-scoring SMILES from the file."""
+        smi_path = pathlib.Path(smi_file)
+        if not smi_path.exists():
+            raise FileNotFoundError(f"SMILES file not found: {smi_file}")
+
+        smiles_all = [l.strip() for l in smi_path.open() if l.strip()]
+        if not smiles_all:
+            raise ValueError(f"No valid SMILES found in {smi_file}")
+
+        logger.info(f"[Prescan] Evaluating {len(smiles_all)} SMILES from {smi_file}")
+
+        if len(smiles_all) > 1000:
+            logger.info(f"[Prescan] Too many SMILES ({len(smiles_all)}), sampling 1000 for prescan")
+            import random
+            smiles_all = random.sample(smiles_all, 1000)
+
+        try:
+            if hasattr(self.benchmark, 'score_list'):
+                scores = self.benchmark.score_list(smiles_all)
+            elif hasattr(self.benchmark, 'objective') and hasattr(self.benchmark.objective, 'score'):
+                scores = [float(self.benchmark.objective.score(s)) for s in smiles_all]
+            elif hasattr(self.benchmark, 'score'):
+                scores = [self.benchmark.score(s) for s in smiles_all]
+            else:
+                logger.warning("[Prescan] No suitable scoring method found, using default scores")
+                scores = [0.0] * len(smiles_all)
+        except Exception as e:
+            logger.error(f"[Prescan] Error during scoring: {e}")
+            return smiles_all[:n]
+
+        sorted_pairs = sorted(zip(smiles_all, scores), key=lambda x: x[1])
+        return [s for s, _ in sorted_pairs[:n]]
+
     # ---------- Async scoring ---------- #
     async def score_async(self, smiles: List[str],
                           epoch: Optional[int] = None) -> List[float]:

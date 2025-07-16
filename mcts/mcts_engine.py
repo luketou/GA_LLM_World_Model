@@ -60,13 +60,13 @@ except ImportError as e:
     TreeAnalytics = None
     TreeManipulator = None
 
-# 導入 actions 模組
+# 導入 actions registry 模組
 try:
-    from actions import action
+    from actions.registry import ActionRegistry
     ACTIONS_AVAILABLE = True
 except ImportError as e:
     logger.warning(f"Actions module not available: {e}")
-    action = None
+    ActionRegistry = None
     ACTIONS_AVAILABLE = False
 
 class MCTSEngine:
@@ -86,6 +86,7 @@ class MCTSEngine:
         self.max_depth = max_depth
         self.llm_gen = llm_gen
         self.config = config  # 保存配置
+        self.action_registry = ActionRegistry() if ACTIONS_AVAILABLE else None
         
         mcts_config = self.config.get("mcts", {})
         self.c_uct = mcts_config.get("c_uct", 1.414)
@@ -166,12 +167,8 @@ class MCTSEngine:
         """
         Propose actions using the unified action module.
         """
-        if ACTIONS_AVAILABLE and action:
-            proposed_actions = action.propose_mixed_actions(
-                parent_smiles=parent_smiles,
-                depth=depth,
-                k_init=k_init
-            )
+        if self.action_registry:
+            proposed_actions = [a.__dict__ for a in self.action_registry.sample(k_init)]
             # Filter out invalid actions
             mol = Chem.MolFromSmiles(parent_smiles)
             if not mol:
@@ -203,14 +200,9 @@ class MCTSEngine:
         try:
             # 1. 獲取所有可用動作（使用現有的動作生成機制）
             available_actions = []
-            
-            if ACTIONS_AVAILABLE and action:
-                # 獲取混合動作作為候選池
-                available_actions = action.propose_mixed_actions(
-                    parent_smiles=current_node.smiles,
-                    depth=current_node.depth,
-                    k_init=k_init * 3  # 獲取更多候選動作供LLM選擇
-                )
+
+            if self.action_registry:
+                available_actions = [a.__dict__ for a in self.action_registry.sample(k_init * 3)]
             
             if not available_actions:
                 logger.warning("No available actions for LLM-guided selection")

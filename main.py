@@ -122,19 +122,16 @@ def setup_environment(args):
         raise FileNotFoundError("config/settings.yml not found")
 
 def prescan(cfg, oracle):
-    """
-    Prescan SMILES 檔案，找出最低分分子作為起始種子
-    """
+    """Return a list of seed molecules for the initial population."""
     try:
-        seed, score = oracle.prescan_lowest(cfg["smi_file"])
-        logger.info(f"[Prescan] Lowest-score seed: {seed} (score: {score:.4f})")
-        return seed
+        seeds = oracle.prescan_lowest_n(cfg["smi_file"], n=100)
+        logger.info(f"[Prescan] Selected {len(seeds)} seed molecules")
+        return seeds
     except Exception as e:
         logger.error(f"[Prescan] Error: {e}")
-        # 使用預設種子
         default_seed = cfg.get("START_SMILES", "C1CCCCC1")
         logger.warning(f"[Prescan] Using default seed: {default_seed}")
-        return default_seed
+        return [default_seed]
 
 
 @traceable(
@@ -163,167 +160,42 @@ async def run():
     # 創建工作流程組件
     oracle, engine, graph_app = create_workflow_components(cfg)
     
-    # 1. Prescan 獲取起始分子
-    seed = prescan(cfg, oracle)
-    
-    # 2. 創建初始狀態
-    init_state = AgentState(parent_smiles=seed, depth=0)
-    logger.info(f"[Workflow] Starting with seed: {seed}")
-    
-    # 為 LangSmith 記錄輸入信息
-    langsmith_inputs = {
-        "task_name": cfg['TASK_NAME'],
-        "seed_smiles": seed,
-        "max_depth": cfg['max_depth'],
-        "oracle_limit": cfg['oracle_limit'],
-        "llm_provider": cfg['llm'].get('provider', 'cerebras')
-    }
-    
-    # 3. 進入 LangGraph 工作流程
-    best_result_node = None
-    
-    try:
-        # 添加超時機制
+    # 1. Prescan 獲取起始分子列表
+    seeds = prescan(cfg, oracle)
+    overall_best = None
+
+    for idx, seed in enumerate(seeds):
+        if oracle.calls_left <= 0:
+            break
+
+        engine.best = None
+        init_state = AgentState(parent_smiles=seed, depth=0)
+        logger.info(f"[Workflow {idx+1}/{len(seeds)}] Starting seed: {seed}")
+
         async def run_with_timeout():
-            # 使用新的異步運行函數
             from graph.workflow_graph import run_workflow
             return await run_workflow(init_state)
-        
-        # 設置 30 分鐘超時
-        workflow_output = await asyncio.wait_for(run_with_timeout(), timeout=1800)
-        
-        if workflow_output and isinstance(workflow_output, dict):
-            # 從結果中提取最終狀態和結果
-            final_state = None
-            final_result = None
-            
-            for node_name, node_state in workflow_output.items():
-                # 檢查當前節點狀態是否為字典，並且是否包含 'result' 鍵
-                if isinstance(node_state, dict) and 'result' in node_state:
-                    potential_result = node_state['result']
-                    # 檢查 'result' 鍵的值是否為字典，並且是否包含 'best' 鍵
-                    if isinstance(potential_result, dict) and 'best' in potential_result:
-                        final_result = potential_result
-                        final_state = node_state
-                        break
-                elif hasattr(node_state, 'result') and node_state.result:
-                    final_result = node_state.result
-                    final_state = node_state
-                    break
-                elif isinstance(node_state, AgentState):
-                    final_state = node_state
-            
-            if final_result:
-                best_result_node = final_result.get("best")
-                reason = final_result.get("reason", "Unknown")
-                logger.info(f"[Workflow] Completed: {reason}")
-                
-                if best_result_node and hasattr(best_result_node, 'smiles'):
-                    logger.info(f"[Workflow] Best SMILES: {best_result_node.smiles}")
-                    # 使用 oracle_score 而非 total_score
-                    oracle_score = getattr(best_result_node, 'oracle_score', 0.0)
-                    total_score = getattr(best_result_node, 'total_score', 0.0)
-                    logger.info(f"[Workflow] Best oracle score: {oracle_score}")
-                    logger.info(f"[Workflow] Best total score: {total_score}")
-                    logger.info(f"[Workflow] Depth: {getattr(best_result_node, 'depth', 'N/A')}")
-                    logger.info(f"[Workflow] Visits: {getattr(best_result_node, 'visits', 'N/A')}")
-                else:
-                    logger.warning("[Workflow] Best result found but no valid molecule")
-            else:
-                logger.warning("[Workflow] No final result found")
-                
-            # 輸出一些統計信息
-            if final_state:
-                if isinstance(final_state, dict):
-                    logger.info(f"[Workflow] Final depth reached: {final_state.get('depth', 'Unknown')}")
-                    logger.info(f"[Workflow] Final parent: {final_state.get('parent_smiles', 'Unknown')}")
-                else:
-                    logger.info(f"[Workflow] Final depth reached: {getattr(final_state, 'depth', 'Unknown')}")
-                    logger.info(f"[Workflow] Final parent: {getattr(final_state, 'parent_smiles', 'Unknown')}")
-        else:
-            logger.warning("[Workflow] No result returned")
-        
-    except asyncio.TimeoutError:
-        logger.error("[Workflow] Timeout: Workflow took too long (30 minutes)")
-        # 嘗試獲取當前最佳結果
+
         try:
-            best_result_node = engine.best if hasattr(engine, 'best') and engine.best else None
-            if best_result_node:
-                logger.info(f"[Workflow] Using best result from timeout: {best_result_node.smiles}")
+            await asyncio.wait_for(run_with_timeout(), timeout=1800)
         except Exception as e:
-            logger.warning(f"Could not retrieve best result from engine: {e}")
-            
-    except KeyboardInterrupt:
-        logger.info("[Workflow] Interrupted by user")
-        # 嘗試獲取當前最佳結果
-        try:
-            best_result_node = engine.best if hasattr(engine, 'best') and engine.best else None
-            if best_result_node:
-                logger.info(f"[Workflow] Using best result from interruption: {best_result_node.smiles}")
-        except Exception as e:
-            logger.warning(f"Could not retrieve best result from engine: {e}")
-            
-    except Exception as e:
-        logger.error(f"[Workflow] Error: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        # 嘗試獲取當前最佳結果
-        try:
-            best_result_node = engine.best if hasattr(engine, 'best') and engine.best else None
-            if best_result_node:
-                logger.info(f"[Workflow] Using best result from error: {best_result_node.smiles}")
-        except Exception as e2:
-            logger.warning(f"Could not retrieve best result from engine: {e2}")
-        
-    # 4. 輸出最終結果
-    if best_result_node and hasattr(best_result_node, 'smiles'):
-        # 優先使用 oracle_score，如果不存在則使用 total_score
-        oracle_score = getattr(best_result_node, 'oracle_score', 0.0)
-        total_score = getattr(best_result_node, 'total_score', 0.0)
-        score_to_print = oracle_score if oracle_score != 0.0 else total_score
-        
-        if not isinstance(score_to_print, (int, float)):
-            score_to_print = 0.0
-            
-        # 為 LangSmith 記錄輸出信息
-        langsmith_outputs = {
-            "success": True,
-            "best_smiles": best_result_node.smiles,
-            "best_oracle_score": oracle_score,
-            "best_total_score": total_score,
-            "best_score": score_to_print,
-            "final_depth": getattr(best_result_node, 'depth', 'N/A'),
-            "visits": getattr(best_result_node, 'visits', 'N/A'),
-            "oracle_calls_remaining": oracle.calls_left,
-            "llm_provider": cfg['llm'].get('provider', 'cerebras')
-        }
-        
-        print(f"\n=== FINAL RESULT ===")
-        print(f"BEST SMILES: {best_result_node.smiles}")
-        print(f"BEST SCORE:  {score_to_print:.4f}")
-        if oracle_score != 0.0:
-            print(f"ORACLE SCORE: {oracle_score:.4f}")
-        if total_score != oracle_score:
-            print(f"TOTAL SCORE:  {total_score:.4f}")
-        print(f"VISITS:      {getattr(best_result_node, 'visits', 'N/A')}")
-        print(f"ORACLE CALLS REMAINING: {oracle.calls_left}")
-        print(f"LLM PROVIDER: {cfg['llm'].get('provider', 'cerebras')}")
+            logger.error(f"[Workflow {idx+1}] Error: {e}")
+            continue
+
+        if engine.best and (
+            not overall_best or
+            getattr(engine.best, 'oracle_score', 0.0) > getattr(overall_best, 'oracle_score', 0.0)
+        ):
+            overall_best = engine.best
+
+    if overall_best and hasattr(overall_best, 'smiles'):
+        score = getattr(overall_best, 'oracle_score', getattr(overall_best, 'total_score', 0.0))
+        print("\n=== FINAL RESULT ===")
+        print(f"BEST SMILES: {overall_best.smiles}")
+        print(f"BEST SCORE: {score:.4f}")
     else:
-        # 為 LangSmith 記錄失敗信息
-        langsmith_outputs = {
-            "success": False,
-            "best_smiles": None,
-            "best_score": 0.0,
-            "oracle_calls_remaining": oracle.calls_left,
-            "reason": "No valid result found",
-            "llm_provider": cfg['llm'].get('provider', 'cerebras')
-        }
-        
-        print(f"\n=== NO RESULT FOUND ===")
-        print(f"ORACLE CALLS REMAINING: {oracle.calls_left}")
-        print(f"LLM PROVIDER: {cfg['llm'].get('provider', 'cerebras')}")
-    
-    # 5. 清理資源
+        print("\n=== NO RESULT FOUND ===")
+
     oracle.close()
     logger.info("=== GA LLM World Model Finished ===")
 
