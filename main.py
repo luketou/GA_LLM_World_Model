@@ -13,6 +13,21 @@ import yaml
 import pathlib
 import logging
 import os
+import sys
+import argparse
+
+# Set up logging FIRST to ensure all modules can use it
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Ensure project root is in Python path
+project_root = os.path.dirname(os.path.abspath(__file__))
+if project_root not in sys.path:
+    sys.path.insert(0, project_root)
+
 from langsmith import traceable
 
 # 早期初始化 LangSmith（在導入其他模組之前）
@@ -46,27 +61,67 @@ def init_langsmith():
             os.environ["LANGSMITH_API_KEY"] = langsmith_config.get("api_key", "")
             os.environ["LANGSMITH_PROJECT"] = langsmith_config.get("project", "world model agent")
             print(f"LangSmith tracing initialized for project: {langsmith_config.get('project', 'world model agent')}")
-            
-        # 同時設定 Cerebras API 金鑰
+
+def parse_args():
+    """解析命令行參數"""
+    parser = argparse.ArgumentParser(description='GA LLM World Model - Molecular Optimization')
+    parser.add_argument('--provider', 
+                       choices=['github', 'cerebras'], 
+                       default=None,
+                       help='LLM provider to use (github or cerebras). Overrides settings.yml')
+    return parser.parse_args()
+
+def setup_environment(args):
+    """設置環境變數和配置"""
+    # 初始化 LangSmith
+    init_langsmith()
+    
+    # 讀取配置檔案
+    import re
+    def env_var_constructor(loader, node):
+        value = loader.construct_scalar(node)
+        pattern = re.compile(r'\$\{([^}]+)\}')
+        match = pattern.search(value)
+        if match:
+            env_var = match.group(1)
+            return os.environ.get(env_var, "")
+        return value
+
+    yaml.SafeLoader.add_constructor('!ENV', env_var_constructor)
+    
+    config_path = pathlib.Path("config/settings.yml")
+    if config_path.exists():
+        cfg = yaml.safe_load(config_path.read_text())
+        
+        # 如果命令行指定了 provider，覆蓋配置檔案設定
+        if args.provider:
+            cfg["llm"]["provider"] = args.provider
+            print(f"Using LLM provider: {args.provider} (from command line)")
+        else:
+            print(f"Using LLM provider: {cfg['llm'].get('provider', 'cerebras')} (from settings.yml)")
+        
+        # 根據選擇的 provider 設置相應的 API 金鑰
         llm_config = cfg.get("llm", {})
-        if llm_config.get("api_key"):
-            os.environ["CEREBRAS_API_KEY"] = llm_config.get("api_key")
-            print(f"Cerebras API key loaded from settings.yml")
+        provider = llm_config.get("provider", "cerebras")
+        
+        if provider == "github":
+            # 設置 GitHub API 金鑰
+            github_api_key = llm_config.get("github_api_key")
+            if github_api_key and not os.environ.get("GITHUB_TOKEN"):
+                os.environ["GITHUB_TOKEN"] = github_api_key
+                print("GitHub API key loaded from settings.yml")
+        elif provider == "cerebras":
+            # 設置 Cerebras API 金鑰
+            cerebras_api_key = llm_config.get("api_key")
+            if cerebras_api_key and not os.environ.get("CEREBRAS_API_KEY"):
+                os.environ["CEREBRAS_API_KEY"] = cerebras_api_key
+                print("Cerebras API key loaded from settings.yml")
+        
+        return cfg
+    else:
+        raise FileNotFoundError("config/settings.yml not found")
 
-# 初始化 LangSmith
-init_langsmith()
-
-from graph.workflow_graph import graph_app, AgentState, oracle, cfg
-
-# 設置日誌
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-
-def prescan():
+def prescan(cfg, oracle):
     """
     Prescan SMILES 檔案，找出最低分分子作為起始種子
     """
@@ -90,13 +145,26 @@ async def run():
     """
     主要執行流程
     """
+    # 解析命令行參數
+    args = parse_args()
+    
+    # 設置環境和配置
+    cfg = setup_environment(args)
+    
+    # 延遲導入以確保環境變數已設置
+    from graph.workflow_graph import create_workflow_components, AgentState
+    
     logger.info("=== GA LLM World Model Started ===")
     logger.info(f"Task: {cfg['TASK_NAME']}")
     logger.info(f"Max depth: {cfg['max_depth']}")
     logger.info(f"Oracle limit: {cfg['oracle_limit']}")
+    logger.info(f"LLM Provider: {cfg['llm'].get('provider', 'cerebras')}")
+    
+    # 創建工作流程組件
+    oracle, engine, graph_app = create_workflow_components(cfg)
     
     # 1. Prescan 獲取起始分子
-    seed = prescan()
+    seed = prescan(cfg, oracle)
     
     # 2. 創建初始狀態
     init_state = AgentState(parent_smiles=seed, depth=0)
@@ -107,16 +175,22 @@ async def run():
         "task_name": cfg['TASK_NAME'],
         "seed_smiles": seed,
         "max_depth": cfg['max_depth'],
-        "oracle_limit": cfg['oracle_limit']
+        "oracle_limit": cfg['oracle_limit'],
+        "llm_provider": cfg['llm'].get('provider', 'cerebras')
     }
     
     # 3. 進入 LangGraph 工作流程
     best_result_node = None
     
     try:
-        # 使用新的異步運行函數
-        from graph.workflow_graph import run_workflow
-        workflow_output = await run_workflow(init_state)
+        # 添加超時機制
+        async def run_with_timeout():
+            # 使用新的異步運行函數
+            from graph.workflow_graph import run_workflow
+            return await run_workflow(init_state)
+        
+        # 設置 30 分鐘超時
+        workflow_output = await asyncio.wait_for(run_with_timeout(), timeout=1800)
         
         if workflow_output and isinstance(workflow_output, dict):
             # 從結果中提取最終狀態和結果
@@ -146,7 +220,11 @@ async def run():
                 
                 if best_result_node and hasattr(best_result_node, 'smiles'):
                     logger.info(f"[Workflow] Best SMILES: {best_result_node.smiles}")
-                    logger.info(f"[Workflow] Best score: {getattr(best_result_node, 'total_score', 'N/A')}")
+                    # 使用 oracle_score 而非 total_score
+                    oracle_score = getattr(best_result_node, 'oracle_score', 0.0)
+                    total_score = getattr(best_result_node, 'total_score', 0.0)
+                    logger.info(f"[Workflow] Best oracle score: {oracle_score}")
+                    logger.info(f"[Workflow] Best total score: {total_score}")
                     logger.info(f"[Workflow] Depth: {getattr(best_result_node, 'depth', 'N/A')}")
                     logger.info(f"[Workflow] Visits: {getattr(best_result_node, 'visits', 'N/A')}")
                 else:
@@ -165,16 +243,45 @@ async def run():
         else:
             logger.warning("[Workflow] No result returned")
         
+    except asyncio.TimeoutError:
+        logger.error("[Workflow] Timeout: Workflow took too long (30 minutes)")
+        # 嘗試獲取當前最佳結果
+        try:
+            best_result_node = engine.best if hasattr(engine, 'best') and engine.best else None
+            if best_result_node:
+                logger.info(f"[Workflow] Using best result from timeout: {best_result_node.smiles}")
+        except Exception as e:
+            logger.warning(f"Could not retrieve best result from engine: {e}")
+            
     except KeyboardInterrupt:
         logger.info("[Workflow] Interrupted by user")
+        # 嘗試獲取當前最佳結果
+        try:
+            best_result_node = engine.best if hasattr(engine, 'best') and engine.best else None
+            if best_result_node:
+                logger.info(f"[Workflow] Using best result from interruption: {best_result_node.smiles}")
+        except Exception as e:
+            logger.warning(f"Could not retrieve best result from engine: {e}")
+            
     except Exception as e:
         logger.error(f"[Workflow] Error: {e}")
         import traceback
         logger.error(traceback.format_exc())
+        # 嘗試獲取當前最佳結果
+        try:
+            best_result_node = engine.best if hasattr(engine, 'best') and engine.best else None
+            if best_result_node:
+                logger.info(f"[Workflow] Using best result from error: {best_result_node.smiles}")
+        except Exception as e2:
+            logger.warning(f"Could not retrieve best result from engine: {e2}")
         
     # 4. 輸出最終結果
     if best_result_node and hasattr(best_result_node, 'smiles'):
-        score_to_print = getattr(best_result_node, 'total_score', 0.0)
+        # 優先使用 oracle_score，如果不存在則使用 total_score
+        oracle_score = getattr(best_result_node, 'oracle_score', 0.0)
+        total_score = getattr(best_result_node, 'total_score', 0.0)
+        score_to_print = oracle_score if oracle_score != 0.0 else total_score
+        
         if not isinstance(score_to_print, (int, float)):
             score_to_print = 0.0
             
@@ -182,17 +289,25 @@ async def run():
         langsmith_outputs = {
             "success": True,
             "best_smiles": best_result_node.smiles,
+            "best_oracle_score": oracle_score,
+            "best_total_score": total_score,
             "best_score": score_to_print,
             "final_depth": getattr(best_result_node, 'depth', 'N/A'),
             "visits": getattr(best_result_node, 'visits', 'N/A'),
-            "oracle_calls_remaining": oracle.calls_left
+            "oracle_calls_remaining": oracle.calls_left,
+            "llm_provider": cfg['llm'].get('provider', 'cerebras')
         }
         
         print(f"\n=== FINAL RESULT ===")
         print(f"BEST SMILES: {best_result_node.smiles}")
         print(f"BEST SCORE:  {score_to_print:.4f}")
+        if oracle_score != 0.0:
+            print(f"ORACLE SCORE: {oracle_score:.4f}")
+        if total_score != oracle_score:
+            print(f"TOTAL SCORE:  {total_score:.4f}")
         print(f"VISITS:      {getattr(best_result_node, 'visits', 'N/A')}")
         print(f"ORACLE CALLS REMAINING: {oracle.calls_left}")
+        print(f"LLM PROVIDER: {cfg['llm'].get('provider', 'cerebras')}")
     else:
         # 為 LangSmith 記錄失敗信息
         langsmith_outputs = {
@@ -200,11 +315,13 @@ async def run():
             "best_smiles": None,
             "best_score": 0.0,
             "oracle_calls_remaining": oracle.calls_left,
-            "reason": "No valid result found"
+            "reason": "No valid result found",
+            "llm_provider": cfg['llm'].get('provider', 'cerebras')
         }
         
         print(f"\n=== NO RESULT FOUND ===")
         print(f"ORACLE CALLS REMAINING: {oracle.calls_left}")
+        print(f"LLM PROVIDER: {cfg['llm'].get('provider', 'cerebras')}")
     
     # 5. 清理資源
     oracle.close()

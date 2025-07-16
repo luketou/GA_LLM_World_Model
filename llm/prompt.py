@@ -1,178 +1,132 @@
 """
-LLM Prompt Templates
-系統提示模板和動作提示模板
-確保格式化後傳遞給 LLM 的訊息結構正確
+LLM Prompt Templates - Enhanced for Reliable SMILES Generation with Token Markers
+強化版提示模板，使用特定token標記解決 LLM 生成失敗問題
 """
 from textwrap import dedent
 from typing import List, Dict, Any
 
+# 強化系統提示 - 使用特定token標記
+ENHANCED_SYSTEM_TEMPLATE = dedent("""\
+You are an expert medicinal chemist specializing in SMILES notation and molecular design.
+Your task is to generate valid SMILES strings based on chemical modifications.
 
-# 系統提示模板
-SYS_TEMPLATE = dedent("""\
-You are an expert medicinal chemist with deep knowledge of molecular design and SMILES notation.
+CRITICAL REQUIREMENTS:
+1. ALWAYS wrap each SMILES string with <SMILES> and </SMILES> tokens
+2. Generate one SMILES per line
+3. NO explanations, NO thinking process, NO additional text
+4. Every SMILES must be chemically valid and unique
+5. Apply the requested modifications systematically
 
-Your task is to generate valid SMILES strings for molecules based on a parent molecule and specified chemical modifications.
+FORMAT EXAMPLE:
+<SMILES>c1ccc(Cl)cc1</SMILES>
+<SMILES>c1ccc(Br)cc1</SMILES>
+<SMILES>c1ccc(F)cc1</SMILES>
 
-Key guidelines:
-1. Always return chemically valid SMILES strings
-2. Apply the requested chemical modifications accurately
-3. Maintain drug-likeness properties when possible
-4. Ensure the generated molecules are chemically reasonable
-5. Return exactly the number of molecules requested
-
-Format your response as a JSON list of SMILES strings:
-["SMILES1", "SMILES2", "SMILES3", ...]
-
-Important:
-- Only return the JSON list, no explanations or additional text
-- Ensure molecular validity and chemical feasibility
-- Consider the chemical logic of the transformations
+FORBIDDEN:
+- Do NOT start with <think> or any thinking tags
+- Do NOT use words like "Okay," "First," "Now," etc.
+- Do NOT provide explanations or descriptions
+- Do NOT use "Modification" or similar words
+- Do NOT forget the <SMILES></SMILES> wrapper tokens
 """)
 
-# 動作提示模板
-ACTION_TEMPLATE = """Parent molecule: {parent_smiles}
+# Few-shot 範例提示模板 - 使用token標記
+FEW_SHOT_TEMPLATE = dedent("""\
+Parent: c1ccccc1
+Modifications: Add halogen substituents
+Response:
+<SMILES>c1ccc(Cl)cc1</SMILES>
+<SMILES>c1ccc(Br)cc1</SMILES>
+<SMILES>c1ccc(F)cc1</SMILES>
 
-Please generate {num_molecules} new molecules by applying the following chemical modifications:
+Parent: CCO
+Modifications: Add functional groups
+Response:
+<SMILES>CCN</SMILES>
+<SMILES>CCC</SMILES>
+<SMILES>CC(C)O</SMILES>
 
-{actions_description}
+Parent: {parent_smiles}
+Modifications: {modifications}
+Response:""")
 
-Requirements:
-- Start with the parent molecule: {parent_smiles}
-- Apply the specified modifications to create structurally related molecules
-- Ensure all generated SMILES are valid and chemically reasonable
-- Return exactly {num_molecules} unique SMILES strings
-- Focus on maintaining or improving drug-like properties
-
-Return your response as a JSON list of SMILES strings only, no additional text:
-"""
-
-
-def format_actions_description(actions: List[Dict[str, Any]]) -> str:
+def format_pubchem_info(pubchem_data: dict) -> str:
     """
-    將動作列表格式化為可讀的描述
+    將 PubChem 查詢結果格式化為 LLM prompt 可讀字串
     """
-    descriptions = []
-    for i, action in enumerate(actions, 1):
-        action_type = action.get("type", "unknown")
-        params = action.get("params", {})
-        
-        if action_type == "add_polar_group":
-            group = params.get("group", "unknown")
-            position = params.get("position", "")
-            desc = f"{i}. Add polar group: {group}"
-            if position:
-                desc += f" at {position} position"
-            descriptions.append(desc)
-        elif action_type == "increase_pi_system":
-            rings = params.get("rings", 1)
-            ring_type = params.get("type", "aromatic ring")
-            descriptions.append(f"{i}. Increase π-system by adding {rings} {ring_type}")
-        elif action_type == "decrease_molecular_weight":
-            if params.get("remove_heavy"):
-                atoms = params.get("target_atoms", ["heavy atoms"])
-                descriptions.append(f"{i}. Decrease molecular weight by removing {', '.join(atoms)}")
-            elif params.get("remove_methyl"):
-                descriptions.append(f"{i}. Decrease molecular weight by removing methyl groups")
-            else:
-                descriptions.append(f"{i}. Decrease molecular weight")
-        elif action_type == "swap_heteroatom":
-            from_atom = params.get("from", "?")
-            to_atom = params.get("to", "?")
-            descriptions.append(f"{i}. Swap heteroatom: {from_atom} → {to_atom}")
-        elif action_type == "cyclize":
-            size = params.get("size", "unknown")
-            ring_type = params.get("type", "ring")
-            descriptions.append(f"{i}. Cyclize to form {size}-membered {ring_type}")
-        elif action_type == "substitute":
-            fragment = params.get("fragment", "unknown")
-            smiles = params.get("smiles", "")
-            desc = f"{i}. Substitute with {fragment} group"
-            if smiles:
-                desc += f" ({smiles})"
-            descriptions.append(desc)
-        elif action_type == "add_ring":
-            ring_type = params.get("ring_type", "unknown ring")
-            smiles = params.get("smiles", "")
-            desc = f"{i}. Add {ring_type} ring system"
-            if smiles:
-                desc += f" ({smiles})"
-            descriptions.append(desc)
-        else:
-            # 通用格式化
-            param_str = _format_params(params)
-            descriptions.append(f"{i}. Apply {action_type} modification with params: {param_str}")
-    
-    return "\n".join(descriptions)
+    if not pubchem_data or 'error' in pubchem_data:
+        return "(No PubChem info found)"
+    lines = [
+        f"PubChem CID: {pubchem_data.get('cid', '-')}",
+        f"IUPAC Name: {pubchem_data.get('iupac_name', '-')}\nMolecular Formula: {pubchem_data.get('molecular_formula', '-')}\nMolecular Weight: {pubchem_data.get('molecular_weight', '-')}\nCanonical SMILES: {pubchem_data.get('canonical_smiles', '-')}\nXLogP: {pubchem_data.get('xlogp', '-')}\nH-bond Donor Count: {pubchem_data.get('h_bond_donor_count', '-')}\nH-bond Acceptor Count: {pubchem_data.get('h_bond_acceptor_count', '-')}\nPubChem URL: {pubchem_data.get('pubchem_url', '-')}"
+    ]
+    return '\n'.join(lines)
 
-
-def _format_params(params: Dict[str, Any]) -> str:
-    """格式化動作參數為可讀字串"""
-    if not params:
-        return "None"
-    
-    formatted_parts = []
-    for key, value in params.items():
-        formatted_parts.append(f"{key}={value}")
-    
-    return ", ".join(formatted_parts)
-
-
-def create_llm_messages(parent_smiles: str, actions: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+def create_enhanced_llm_messages(parent_smiles: str, actions: List[Dict[str, Any]], pubchem_data: dict = None) -> List[Dict[str, str]]:
     """
-    創建發送給 LLM 的完整消息列表
-    
-    Args:
-        parent_smiles: 父分子 SMILES
-        actions: 動作列表
-        
-    Returns:
-        LLM 消息列表
+    創建強化版 LLM 消息，使用 <SMILES></SMILES> token 標記，並可選擇加入 PubChem 資訊
     """
     if not actions:
-        return [
-            {"role": "system", "content": SYS_TEMPLATE},
-            {"role": "user", "content": f"Generate a valid SMILES variation of: {parent_smiles}"}
-        ]
+        modifications = "Generate chemical variations"
+    else:
+        modifications = _create_clear_modifications_text(actions)
     
-    actions_desc = format_actions_description(actions)
-    num_molecules = len(actions)
-    
-    action_prompt = ACTION_TEMPLATE.format(
+    pubchem_info_block = f"\n\n[PubChem Information for Parent SMILES]\n{format_pubchem_info(pubchem_data)}" if pubchem_data else ""
+    # 使用 Few-shot 範例
+    user_prompt = FEW_SHOT_TEMPLATE.format(
         parent_smiles=parent_smiles,
-        num_molecules=num_molecules,
-        actions_description=actions_desc
-    )
+        modifications=modifications
+    ) + pubchem_info_block
     
     return [
-        {"role": "system", "content": SYS_TEMPLATE},
-        {"role": "user", "content": action_prompt}
+        {"role": "system", "content": ENHANCED_SYSTEM_TEMPLATE},
+        {"role": "user", "content": user_prompt}
     ]
 
-
-def create_simple_generation_prompt(parent_smiles: str, num_variants: int = 5) -> List[Dict[str, str]]:
-    """
-    創建簡單的分子生成提示
+def _create_clear_modifications_text(actions: List[Dict[str, Any]]) -> str:
+    """創建清晰的修改描述，避免複雜語言"""
+    modifications = []
     
-    Args:
-        parent_smiles: 父分子 SMILES
-        num_variants: 要生成的變體數量
+    for action in actions:
+        action_type = action.get("type", "unknown")
+        action_name = action.get("name", "unnamed")
         
-    Returns:
-        LLM 消息列表
+        # 簡化動作描述
+        if action_type == "substitute":
+            modifications.append(f"Add {action_name.replace('add_', '')}")
+        elif action_type == "scaffold_swap":
+            modifications.append(f"Replace with {action_name.replace('swap_to_', '')}")
+        elif action_type == "cyclization":
+            modifications.append("Form ring")
+        elif action_type == "ring_opening":
+            modifications.append("Open ring")
+        else:
+            modifications.append(action_name.replace('_', ' '))
+    
+    return "; ".join(modifications[:10])  # 限制長度避免過度複雜
+
+def create_simple_generation_prompt(parent_smiles: str, num_variants: int = 5, pubchem_data: dict = None) -> List[Dict[str, str]]:
     """
-    system_prompt = f"""You are an expert molecular design AI. Generate {num_variants} chemically valid SMILES variations of the given parent molecule.
-
-Requirements:
-1. All SMILES must be chemically valid
-2. Generate meaningful chemical variations (not random changes)
-3. Return EXACTLY a JSON list format: ["SMILES1", "SMILES2", ...]
-4. No explanations, only the JSON list"""
-
-    user_prompt = f"""Parent molecule: {parent_smiles}
-
-Generate {num_variants} chemical variations as a JSON list of SMILES strings."""
-
+    創建簡單可靠的分子生成提示 - 使用token標記，並可選擇加入 PubChem 資訊
+    """
+    system_prompt = f"""You are a SMILES generator. Generate {num_variants} valid SMILES variations.\nWRAP each SMILES with <SMILES></SMILES> tokens.\nOne SMILES per line. NO other text allowed.\n\nEXAMPLE:\n<SMILES>CCO</SMILES>\n<SMILES>CCN</SMILES>"""
+    pubchem_info_block = f"\n\n[PubChem Information for Parent SMILES]\n{format_pubchem_info(pubchem_data)}" if pubchem_data else ""
+    user_prompt = f'Parent: {parent_smiles}\nGenerate {num_variants} variations:' + pubchem_info_block
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
+    ]
+
+def create_fallback_prompt(parent_smiles: str, num_variants: int = 5, pubchem_data: dict = None) -> List[Dict[str, str]]:
+    """創建最簡化的後備提示 - 使用token標記，並可選擇加入 PubChem 資訊"""
+    pubchem_info_block = f"\n\n[PubChem Information for Parent SMILES]\n{format_pubchem_info(pubchem_data)}" if pubchem_data else ""
+    return [
+        {
+            "role": "system", 
+            "content": f"Generate {num_variants} valid SMILES. Use format: <SMILES>SMILES_STRING</SMILES>"
+        },
+        {
+            "role": "user", 
+            "content": f"{parent_smiles} -> variations" + pubchem_info_block
+        }
     ]

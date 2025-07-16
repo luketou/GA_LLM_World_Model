@@ -23,6 +23,11 @@ from typing import Optional
 from rdkit import Chem
 from rdkit.Chem import rdMolDescriptors
 from rdkit import DataStructs
+import pubchempy as pcp
+import time
+from diskcache import Cache
+from utils.concurrency import RateLimiterAsync
+import asyncio
 
 
 def tanimoto(smiles1: str, smiles2: str, radius: int = 2, nBits: int = 2048) -> float:
@@ -146,3 +151,53 @@ def qed(smiles: str) -> Optional[float]:
         return QED.qed(mol)
     except Exception:
         return None
+
+
+# --- PubChem RAG + Cache ---
+# 初始化一個持久化快取（建議用相對路徑，跨平台）
+effective_cache = Cache('./pubchem_cache')
+# 建立一個異步速率限制器（每秒最多 5 次）
+rate_limiter = RateLimiterAsync(rate=5, per=1)
+
+def get_pubchem_data_v2(smiles: str) -> dict:
+    """
+    查詢 PubChem 並快取 SMILES 對應的分子資訊。
+    Args:
+        smiles: SMILES 字串
+    Returns:
+        dict: 包含 PubChem 查詢結果或錯誤訊息
+    """
+    if smiles in effective_cache:
+        print(f"✅ 從「硬碟」快取命中: {smiles}")
+        return effective_cache[smiles]
+
+    print(f"🚀 正在向 PubChem API 查詢: {smiles}")
+    try:
+        # 強制速率限制（同步版本，若需異步請改用 asyncio）
+        loop = asyncio.get_event_loop() if asyncio.get_event_loop().is_running() else None
+        if loop:
+            loop.run_until_complete(rate_limiter.acquire())
+        else:
+            time.sleep(0.2)  # 最簡單的速率限制
+
+        compounds = pcp.get_compounds(smiles, 'smiles')
+        if not compounds:
+            data = {"error": "Not found"}
+        else:
+            compound = compounds[0]
+            data = {
+                "cid": compound.cid,
+                "iupac_name": compound.iupac_name,
+                "molecular_formula": compound.molecular_formula,
+                "molecular_weight": float(compound.molecular_weight) if compound.molecular_weight else None,
+                "canonical_smiles": compound.canonical_smiles,
+                "xlogp": float(compound.xlogp) if compound.xlogp else None,
+                "h_bond_donor_count": compound.h_bond_donor_count,
+                "h_bond_acceptor_count": compound.h_bond_acceptor_count,
+                "pubchem_url": f"https://pubchem.ncbi.nlm.nih.gov/compound/{compound.cid}"
+            }
+        # 存入持久化快取
+        effective_cache[smiles] = data
+        return data
+    except Exception as e:
+        return {"error": str(e)}

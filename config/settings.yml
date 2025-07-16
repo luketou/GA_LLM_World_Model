@@ -3,7 +3,7 @@ START_SMILES: C1CCCCC1                      # dummy seed，稍候由 prescan 覆
 TASK_NAME: celecoxib                       # 默認測試任務
 
 # MCTS / GRPO / UCT 參數
-K_init: 8
+K_init: 15 # number of smiles generated for each node
 p_top: 8
 c_uct: 1.4
 gamma_adv: 0.3
@@ -12,6 +12,15 @@ beta_pw: 0.6
 grpo_eps: 0.2
 max_depth: 50  # search tree 最大深度
 
+mcts:
+  c_uct: 1.4
+  divisity_weight: 0.1
+  visit_penalty: 0.01 # 新增：對已訪問節點的懲罰因子
+  prune_interval: 25 # 每 25 次迭代進行一次 pruning
+  max_tree_size: 1000 # 最大樹大小，超過此大小將停止擴展樹
+  keep_top_k : 100 # 修剪時保留的最佳子樹數量
+# GRPO 設定
+ 
 # Oracle 設定
 oracle_limit: 500
 oracle_rate: 600_per_hour                  # 令牌桶
@@ -19,7 +28,8 @@ smi_file: data/guacamol_v1_all.txt
 
 # 工作流程設定
 workflow:
-  recursion_limit: 200                     # LangGraph 遞迴限制，預設為 50
+  batch_size: 30
+  recursion_limit: 1000                     # LangGraph 遞迴限制，預設為 50
   max_iterations: 1000                     # 最大迭代次數
   early_stop_threshold: 0.9                # 早停閾值：找到此分數以上的分子就停止
   max_smiles_length: 100                   # SMILES 最大長度限制，超過此長度的分子將被過濾或終止
@@ -27,13 +37,25 @@ workflow:
 
 # LLM 設定
 llm:
-  provider: cerebras  # 使用 cerebras 而不是 openai
-  model_name: llama-3.3-70b
+  provider: cerebras  # 可選 "github" 或 "cerebras"
+  
+  # Cerebras 設定
+  model_name: qwen-3-32b
+  api_key: csk-r45fve4re56cxcmmvj8j4f5c5hrvt893deyk9p9pwre36t38
+  
+  # GitHub 設定（當 provider 為 "github" 時使用）
+  github_model_name: openai/gpt-4.1
+  github_api_key: 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
+  
+  # 通用設定
   temperature: 0.2
   max_completion_tokens: 2048
   top_p: 1
-  stream: true
-  api_key: csk-8f3ct6y23mw2fw3fdmyx8t4tx8rw8p85tdx9nrm8mv2t9m26
+  stream: false
+
+  vllm:
+    model_name: "Qwen/Qwen2-7B-Instruct-AWQ"
+    api_url: "http://localhost:8000/v1/chat/completions"
 
 # LangSmith 設定
 langsmith:
