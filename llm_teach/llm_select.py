@@ -559,8 +559,13 @@ def main():
                         help='Number of times to retry a Cerebras request if rate‑limited')
     parser.add_argument('--retry_base_wait', type=int, default=1,
                         help='Base seconds for exponential back‑off when hitting rate‑limit')
-    parser.add_argument('--cerebras_api_key', type=str, default="csk-38kjr3mnp22x9w2m2wejdej5m55cpkwhmh3p6p6f3wt2wxw2",
-                        help='API key for Cerebras Cloud SDK')
+    parser.add_argument(
+        '--cerebras_api_keys',
+        nargs=4,
+        metavar='KEY',
+        help='Four Cerebras API keys to rotate between',
+        required=True
+    )
     parser.add_argument('--tasks', nargs='+',
                         help='List of task names to process, e.g. celecoxib fexofenadine')
     parser.add_argument('--pipeline_parallel_size', type=int, default=1,
@@ -568,6 +573,10 @@ def main():
     parser.add_argument('--distributed_executor_backend', type=str, default=None,
                         help='Distributed backend for vLLM ("ray" for multi-node, "mp" for single node)')
     args = parser.parse_args()
+
+    # Prepare rotating Cerebras API keys
+    api_keys = args.cerebras_api_keys
+    key_index = 0
 
     # Determine tasks to run
     if args.tasks:
@@ -642,8 +651,13 @@ def main():
                     gen, sel = fut.result()
                     append_generation_to_csv(gen, sel, output_path)
         else:  # cerebras
-            client = llm
+            # Rotate keys for each generation when using Cerebras
             for generation, molecules in unfinished.items():
+                # Select next API key
+                current_key = api_keys[key_index]
+                key_index = (key_index + 1) % len(api_keys)
+                client = Cerebras(api_key=current_key)
+
                 candidate_molecules = molecules[:args.max_candidates] if args.max_candidates > 0 else molecules
                 prompt = create_selection_prompt(task, generation, candidate_molecules)
                 print('[Prompt]', prompt.replace('\n', ' '))
@@ -651,10 +665,8 @@ def main():
                 for attempt in range(1, args.retry_attempts + 1):
                     try:
                         stream = client.chat.completions.create(
-                            messages=[
-                                {"role": "system", "content": "You are a medicinal chemistry expert evaluating molecules for drug discovery."},
-                                {"role": "user", "content": prompt}
-                            ],
+                            messages=[{"role": "system", "content": "You are a medicinal chemistry expert evaluating molecules for drug discovery."},
+                                      {"role": "user", "content": prompt}],
                             model=args.model,
                             stream=True,
                             max_completion_tokens=args.max_tokens,
