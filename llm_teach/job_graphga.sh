@@ -47,26 +47,26 @@ touch log/main.log
 
 TASKS=(
 # osimertinib
-fexofenadine
+# fexofenadine
 # ranolazine
 amlodipine
 # perindopril
-sitagliptin
+# sitagliptin
 # zaleplon
 # cobimetinib
 # cns_mpo
-scaffold_hop
+# scaffold_hop
 # decoration_hop
 # weird_physchem
 # valsartan_smarts
-median1
+# median1
 # median2
 # isomer_c11h24
-isomer_c9h10n2o2pf2cl
-celecoxib
-troglitazone
+# isomer_c9h10n2o2pf2cl
+# celecoxib
+# troglitazone
 # thiothixene
-mestranol
+# mestranol
 )
 
 for TASK in \"${TASKS[@]}\"

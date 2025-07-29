@@ -38,8 +38,6 @@ TASK_BENCHMARK_MAPPING = {
     'sitagliptin': sitagliptin_replacement,
     'zaleplon': zaleplon_with_other_formula,
     'cobimetinib': hard_cobimetinib,
-    'qed': qed_benchmark,
-    'cns_mpo': cns_mpo,
     'scaffold_hop': scaffold_hop,
     'decoration_hop': decoration_hop,
     'weird_physchem': weird_physchem,
@@ -66,6 +64,15 @@ TASK_BENCHMARK_MAPPING = {
         THIOTHIZENE_SMILES, 'Thiothixene', fp_type='ECFP4', threshold=1.0)
 }
 ```
+
+## Files Description
+- llm_select.py : select molecules via only task description and original smiles each generation
+- llm_select_with_fg.py : select molecules via 1. task description 2. original smiles 3. **function group** processed by FARM
+
+## Folder **Data** description
+- functiongroup_offspring : 利用[FARM](https://github.com/thaonguyen217/farm_molecular_representation) 將offspring mol 做function group 切片描述
+- offspring : offspring of graphga 30 mol / generation with 0.5 mutation 
+- population : population of graphga 15 mol / generation with 0.5 mutation, 但紀錄有問題
 
 ## 備註
 - Graph GA 會繪製 max/avg 曲線，並標示每代 LLM 選出的前十名分子。

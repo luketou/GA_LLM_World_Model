@@ -66,6 +66,15 @@ import faiss
 
 # --- LLM generation logging wrapper ---
 def llm_generate_and_log(llm, prompt, sampling_params, generation, batch):
+    # 額外印出 molecules 詳細內容
+    print(f'[Generation {generation}] Molecules:')
+    for i, mol in enumerate(batch, 1):
+        # mol: (smiles, smiles_fg, score)
+        if len(mol) == 3:
+            smiles, smiles_fg, score = mol
+            print(f'  {i}: SMILES={smiles} FG={smiles_fg} Score={score}')
+        else:
+            print(f'  {i}: {mol}')
     print('[Prompt]', prompt.replace('\n', ' '))
     outputs = llm.generate([prompt], sampling_params)
     response = outputs[0].outputs[0].text
@@ -135,7 +144,6 @@ def load_task_csv(csv_path: str) -> Dict[int, List[Tuple[str, float]]]:
         csv_path: Path to the CSV fi
         
     Returns:
-        Dictionrs AutoTokenizer
         Dictionary mapping generation number to list of (smiles, score) tuples
     """
     generation_data = defaultdict(list)
@@ -150,24 +158,44 @@ def load_task_csv(csv_path: str) -> Dict[int, List[Tuple[str, float]]]:
     
     return generation_data
 
-def create_selection_prompt(task: str, generation: int, molecules: List[Tuple[str, float]]) -> str:
+# --- Helper: Load functional-group CSV ---
+def load_fg_csv(csv_path: str) -> Dict[int, List[str]]:
+    """
+    Load a CSV that has columns generation, smiles_fg and return
+    {generation: [smiles_fg_1, smiles_fg_2, ...]}.
+    """
+    fg_data = defaultdict(list)
+    if not os.path.exists(csv_path):
+        return fg_data
+    with open(csv_path, 'r', newline='') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                gen = int(row['generation'])
+                fg = row['smiles_fg']
+                fg_data[gen].append(fg)
+            except Exception:
+                continue
+    return fg_data
+
+def create_selection_prompt(task: str, generation: int, molecules: List[Tuple[str, str, float]]) -> str:
     """
     Create a prompt for the LLM to select promising molecules.
-    
     Args:
         task: The task name (e.g., 'celecoxib', 'osimertinib')
         generation: The generation number
-        molecules: List of (smiles, score) tuples
-        
+        molecules: List of (smiles, smiles_fg, score) tuples
     Returns:
         The prompt string
     """
-    # Create a numbered list of molecules (no scores in the prompt)
+    # Create a numbered list of molecules (include FG in the prompt)
     molecule_list = []
-    for i, (smiles, score) in enumerate(molecules, 1):
-        molecule_list.append(f"{i}. SMILES: {smiles}")
+    for i, mol in enumerate(molecules, 1):
+        smiles, smiles_fg, score = mol
+        # Always show FG (even if empty string)
+        molecule_list.append(f"{i}. SMILES: {smiles} | Function group: {smiles_fg if smiles_fg else 'N/A'}")
     molecules_text = "\n".join(molecule_list)
-    
+
     # GuacaMol task descriptions for context
     task_descriptions = {
   'celecoxib': 
@@ -324,12 +352,13 @@ def create_selection_prompt(task: str, generation: int, molecules: List[Tuple[st
 Task: {task_desc}
 Generation: {generation}
 
-Below are {len(molecules)} molecules from a genetic algorithm optimization, each with their current fitness score.
+Below are {len(molecules)} molecules from a genetic algorithm optimization.
 Your job is to select the 10 most promising molecules based on:
 1. Their potential for the given task
 2. Chemical feasibility and drug-likeness
 3. Structural diversity to maintain genetic diversity
-4. Current fitness scores (higher is better)
+
+Give each molecule a quantitative score and use this score as the basis for screening
 
 Molecules:
 {molecules_text}
@@ -404,7 +433,7 @@ def select_molecules_with_llm(
     """
     # Build global RAG index once
     for task_key in generation_data:
-        all_smiles = [sm for sm, score in sum(generation_data.values(), [])]
+        all_smiles = [sm for sm, _, _ in sum(generation_data.values(), [])]
         break  # Only need one pass, all generations pooled
     model, index = build_molecule_index(all_smiles)
     selected_data = {}
@@ -460,7 +489,7 @@ def process_one_generation(args_tuple):
         llm: vLLM/Cerebras client
         task: task name (str)
         generation: generation index (int)
-        molecules: list of (smiles, score) tuples
+        molecules: list of (smiles, smiles_fg, score) tuples
         sampling_params: VLLM SamplingParams or None
         cfg: tuple(max_candidates, batch_size, max_len)
         model: SentenceTransformer instance
@@ -468,7 +497,7 @@ def process_one_generation(args_tuple):
         tokenizer: HuggingFace tokenizer for token length check
         max_model_len: int for context limit
     Returns:
-        (generation, selected_molecules) with up to 10 (smiles, score).
+        (generation, selected_molecules) with up to 10 (smiles, smiles_fg, score).
     """
     llm, task, generation, molecules, sampling_params, cfg, model, index, tokenizer, max_model_len = args_tuple
 
@@ -512,7 +541,7 @@ def load_completed_generations(output_path: str) -> set:
 # --- New: Append one generation to CSV (thread-safe) ---
 import threading
 csv_write_lock = threading.Lock()
-def append_generation_to_csv(generation: int, molecules: List[Tuple[str, float]], output_path: str):
+def append_generation_to_csv(generation: int, molecules, output_path: str):
     """
     Append selected molecules for one generation to CSV (thread-safe).
     """
@@ -524,7 +553,9 @@ def append_generation_to_csv(generation: int, molecules: List[Tuple[str, float]]
             writer = csv.writer(f)
             if not file_exists:
                 writer.writerow(['generation', 'smiles', 'score'])
-            for smiles, score in molecules:
+            for mol in molecules:
+                smiles = mol[0]
+                score = mol[-1]
                 writer.writerow([generation, smiles, score])
 
 def main():
@@ -537,6 +568,8 @@ def main():
                         help='Input directory containing {task}.csv')
     parser.add_argument('--output_dir', type=str, default='results_llm_select',
                         help='Output directory for selected molecules')
+    parser.add_argument('--fg_dir', type=str, default='data/functiongroup_offspring',
+                        help='Directory containing functional‑group CSVs (generation, smiles_fg)')
     parser.add_argument('--model', type=str, default='deepseek-ai/DeepSeek-R1-Distill-Llama-70B',
                         help='LLM model to use')
     parser.add_argument('--temperature', type=float, default=0.7,
@@ -563,13 +596,19 @@ def main():
                         help='Base seconds for exponential back‑off when hitting rate‑limit')
     parser.add_argument(
         '--cerebras_api_keys',
-        nargs=4,
+        nargs=5,
         metavar='KEY',
         help='Four Cerebras API keys to rotate between',
         required=True
     )
     parser.add_argument('--tasks', nargs='+',
                         help='List of task names to process, e.g. celecoxib fexofenadine')
+    parser.add_argument(
+        '--max_generations',
+        type=int,
+        default=None,
+        help='Maximum number of generations to include; default is all generations'
+    )
     parser.add_argument('--pipeline_parallel_size', type=int, default=1,
                         help='Number of nodes for pipeline parallelism (multi-node distributed)')
     parser.add_argument('--distributed_executor_backend', type=str, default=None,
@@ -623,6 +662,25 @@ def main():
 
         print(f"Loading molecules from {input_path}")
         generation_data = load_task_csv(input_path)
+        # --- Load functional-group annotation and merge ---
+        fg_path = os.path.join(args.fg_dir, f"{task}.csv")
+        fg_data = load_fg_csv(fg_path)
+        # merge: convert each record to (smiles, smiles_fg, score)
+        for gen, mols in list(generation_data.items()):
+            fg_list = fg_data.get(gen, [])
+            merged = []
+            for idx, (sm, score) in enumerate(mols):
+                # Use matching FG by index; if FG list shorter, use empty string
+                sm_fg = fg_list[idx] if idx < len(fg_list) else ""
+                merged.append((sm, sm_fg, score))
+            generation_data[gen] = merged
+
+        # Limit to first N generations if requested
+        if args.max_generations is not None:
+            all_gens = sorted(generation_data.keys())
+            limited = all_gens[:args.max_generations]
+            generation_data = {gen: generation_data[gen] for gen in limited}
+            print(f"Limiting to first {args.max_generations} generations: {limited}")
         print(f"Loaded {sum(len(mols) for mols in generation_data.values())} molecules from {len(generation_data)} generations.")
 
         # --- Load completed generations for resume ---
@@ -657,7 +715,6 @@ def main():
             for generation, molecules in unfinished.items():
                 # Select next API key
                 current_key = api_keys[key_index]
-                key_index = (key_index + 1) % len(api_keys)
                 client = Cerebras(api_key=current_key)
 
                 candidate_molecules = molecules[:args.max_candidates] if args.max_candidates > 0 else molecules
@@ -678,16 +735,20 @@ def main():
                         success = True
                         break
                     except RateLimitError:
-                        wait_time = args.retry_base_wait * (2 ** (attempt - 1))
+                        wait_time = 1  # constant 1‑second delay between retries
                         print(f"[RateLimit] attempt {attempt}/{args.retry_attempts}. Sleeping {wait_time}s …", flush=True)
                         time.sleep(wait_time)
                 if not success:
+                    # 輪替 API key，即使失敗也換下一個
+                    key_index = (key_index + 1) % len(api_keys)
                     continue
                 response = "".join(chunk.choices[0].delta.content or "" for chunk in stream)
                 print('[Response]', response.replace('\n', ' '))
                 indices = parse_llm_selection(response, len(candidate_molecules))
                 selected_pool = [candidate_molecules[idx] for idx in indices if 0 <= idx < len(candidate_molecules)]
                 append_generation_to_csv(generation, selected_pool[:10], output_path)
+                # 輪替 API key，每次 prompt/response 完就換下一個
+                key_index = (key_index + 1) % len(api_keys)
 
         # 統計總數
         completed_generations = load_completed_generations(output_path)
@@ -701,3 +762,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+'''
+python llm_select_with_fg.py --tasks amlodipine --input_dir data/offspring --output_dir results/results_qwen_3_235b_a22b --cerebras_api_keys "csk-yc5xd56kcxwc9x5y5rfc6mw95mfknd892mjjkhdyj39y898h" "csk-8f3ct6y23mw2fw3fdmyx8t4tx8rw8p85tdx9nrm8mv2t9m26" "csk-38kjr3mnp22x9w2m2wejdej5m55cpkwhmh3p6p6f3wt2wxw2" "csk-22c9dktpnx6yc94rpv4h8xp952nvcnypnmn36nrk3ym953yf" "csk-n58d54hd8njxfnd225fkvhyj8wd28v2t656eexecxt3mh6t4" --model qwen-3-235b-a22b --max_model_len 20000 --max_token 10000 --llm_option 'cerebras' --max_candidates 100 2>&1 | tee -a log/job_cerebras.log
+'''

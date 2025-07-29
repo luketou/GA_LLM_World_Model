@@ -9,25 +9,28 @@ def find_score_column(df):
             return col
     raise KeyError("CSV 檔案未找到 'score' 欄位，請確認欄位名稱是否正確。")
 
-def extract_scores(results_dir, task):
+def extract_scores(results_dir, task, max_generations=None):
     csv_path = os.path.join(results_dir, f"{task}.csv")
     df = pd.read_csv(csv_path)
     score_col = find_score_column(df)
     generations = sorted(df['generation'].unique())
+    if max_generations is not None:
+        generations = generations[:max_generations]
     scores_per_gen = [df[df['generation'] == gen][score_col].tolist() for gen in generations]
     max_scores = [max(scores) for scores in scores_per_gen]
     avg_scores = [sum(scores)/len(scores) for scores in scores_per_gen]
     min_scores = [min(scores) for scores in scores_per_gen]
     return generations, max_scores, avg_scores, min_scores, df
 
-def extract_scores_with_fallback(graphga_dir, cerebras_dir, task):
-    # 先讀取兩個csv
+def extract_scores_with_fallback(graphga_dir, cerebras_dir, task, max_generations=None):
     _, _, _, _, df_graphga = extract_scores(graphga_dir, task)
     csv_path_cerebras = os.path.join(cerebras_dir, f"{task}.csv")
     df_cerebras = pd.read_csv(csv_path_cerebras)
     score_col_cerebras = find_score_column(df_cerebras)
     score_col_graphga = find_score_column(df_graphga)
     generations = sorted(df_cerebras['generation'].unique())
+    if max_generations is not None:
+        generations = generations[:max_generations]
     scores_per_gen = []
     for gen in generations:
         gen_df = df_cerebras[df_cerebras['generation'] == gen]
@@ -53,9 +56,9 @@ def extract_scores_with_fallback(graphga_dir, cerebras_dir, task):
     min_scores = [min(scores) if scores and not pd.isna(scores[0]) else float('nan') for scores in scores_per_gen]
     return generations, max_scores, avg_scores, min_scores
 
-def plot_comparison_lines(graphga_dir, cerebras_dir, task):
-    gens_g, max_g, avg_g, min_g, _ = extract_scores(graphga_dir, task)
-    gens_c, max_c, avg_c, min_c = extract_scores_with_fallback(graphga_dir, cerebras_dir, task)
+def plot_comparison_lines(graphga_dir, cerebras_dir, task, max_generations):
+    gens_g, max_g, avg_g, min_g, _ = extract_scores(graphga_dir, task, max_generations)
+    gens_c, max_c, avg_c, min_c = extract_scores_with_fallback(graphga_dir, cerebras_dir, task, max_generations)
 
     # Normalize GraphGA scores
     all_g_scores = max_g + avg_g + min_g
@@ -78,17 +81,17 @@ def plot_comparison_lines(graphga_dir, cerebras_dir, task):
     min_c_n = normalize_c(min_c)
 
     plt.figure(figsize=(12, 7))
-    plt.plot(gens_g[:100], max_g_n[:100], label='GraphGA Max', color='blue')
-    plt.plot(gens_g[:100], avg_g_n[:100], label='GraphGA Avg', color='cyan')
-    plt.plot(gens_g[:100], min_g_n[:100], label='GraphGA Min', color='navy')
+    plt.plot(gens_g, max_g_n, label='GraphGA Max', color='blue')
+    plt.plot(gens_g, avg_g_n, label='GraphGA Avg', color='cyan')
+    plt.plot(gens_g, min_g_n, label='GraphGA Min', color='navy')
 
-    plt.plot(gens_c[:100], max_c_n[:100], label='LLM Max', color='red')
-    plt.plot(gens_c[:100], avg_c_n[:100], label='LLM Avg', color='orange')
-    plt.plot(gens_c[:100], min_c_n[:100], label='LLM Min', color='darkred')
+    plt.plot(gens_c, max_c_n, label='LLM Max', color='red')
+    plt.plot(gens_c, avg_c_n, label='LLM Avg', color='orange')
+    plt.plot(gens_c, min_c_n, label='LLM Min', color='darkred')
 
     plt.xlabel('Generation')
     plt.ylabel('Normalized Score')
-    plt.title(f'Generation Score Comparison for {task} (Normalized)')
+    plt.title(f'50 Generations Score Comparison for {task} (Normalized)')
     plt.legend()
     plt.tight_layout()
     plt.savefig(f"{task}_generation_comparison.png")
@@ -100,8 +103,8 @@ if __name__ == "__main__":
     parser.add_argument('--graphga_dir', type=str, help='Directory for GraphGA result CSV files.',default='results_graphga')
     parser.add_argument('--cerebras_dir', type=str, required=True, help='Directory for Cerebras result CSV files.')
     parser.add_argument('--task', type=str,  help='Task name to plot scores for.',default='celecoxib')
-
+    parser.add_argument('--max_generations', type=int, default=None, help='Maximum number of generations to plot.')
     # example : python plot_generation_score.py --graphga_dir results_graphga --cerebras_dir results_llm_select results_cerebras --task fexofenadine
     args = parser.parse_args()
-    plot_comparison_lines(args.graphga_dir, args.cerebras_dir, args.task)
+    plot_comparison_lines(args.graphga_dir, args.cerebras_dir, args.task, args.max_generations)
     print(f"Comparison plot saved as {args.task}_generation_comparison.png")
