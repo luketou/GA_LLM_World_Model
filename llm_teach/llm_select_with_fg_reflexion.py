@@ -2,6 +2,7 @@
 """
 LLM-based molecule selection script.
 Reads {task}.csv files and uses LLM to select the 10 most promising molecules per generation.
+python llm_select_with_fg.py --tasks amlodipine --input_dir data/offspring --output_dir results/results_qwen_3_235b_a22b     --cerebras_api_keys "csk-yc5xd56kcxwc9x5y5rfc6mw95mfknd892mjjkhdyj39y898h" "csk-8f3ct6y23mw2fw3fdmyx8t4tx8rw8p85tdx9nrm8mv2t9m26" "csk-38kjr3mnp22x9w2m2wejdej5m55cpkwhmh3p6p6f3wt2wxw2" "csk-22c9dktpnx6yc94rpv4h8xp952nvcnypnmn36nrk3ym953yf" "csk-n58d54hd8njxfnd225fkvhyj8wd28v2t656eexecxt3mh6t4"     --model qwen-3-235b-a22b-instruct-2507 --max_model_len 20000 --max_token 10000 --llm_option 'cerebras' --max_candidates 100 --max_generations 50 2>&1 | tee -a log/job_cerebras_rag_impact.log
 """
 
 import argparse
@@ -20,6 +21,27 @@ import re
 import random
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# ---- Simple memory buffer to store generation‑level reflections ----
+class ConversationSummaryBufferMemory:
+    """Lightweight stand‑in for LangChain ConversationSummaryBufferMemory.
+    Stores last N reflection strings and returns concatenated summary."""
+    def __init__(self, max_entries: int = 6):
+        self.max_entries = max_entries
+        self.buffer = []  # list[str]
+
+    def save_context(self, reflection: str):
+        if not reflection:
+            return
+        self.buffer.append(reflection.strip())
+        if len(self.buffer) > self.max_entries:
+            self.buffer = self.buffer[-self.max_entries:]
+
+    def load_summary(self) -> str:
+        return "\n".join(self.buffer)
+
+# global memory instance
+MEMORY = ConversationSummaryBufferMemory(max_entries=6)
 
 try:
     from transformers import AutoTokenizer
@@ -83,13 +105,7 @@ def llm_generate_and_log(llm, prompt, sampling_params, generation, batch):
 
 # --- RateLimitError import and time ---
 import time
-try:
-    from cerebras.cloud.sdk import RateLimitError  # Newer SDKs
-except Exception:
-    try:
-        from cerebras.cloud.sdk.exceptions import RateLimitError  # Older SDKs
-    except Exception:
-        RateLimitError = Exception  # Fallback if not found
+from cerebras.cloud.sdk import RateLimitError  # Newer SDKs
 
 # Attempt to import vllm and Cerebras
 try:
@@ -188,12 +204,18 @@ def create_selection_prompt(task: str, generation: int, molecules: List[Tuple[st
     Returns:
         The prompt string
     """
-    # Create a numbered list of molecules (include FG in the prompt)
+    # ---- insert reflections from previous generations (memory) ----
+    memory_summary = MEMORY.load_summary()
+    if memory_summary:
+        memory_block = f"Reflections from previous generations:\n{memory_summary}\n\n"
+    else:
+        memory_block = ""
+
+    # Create a numbered list of molecules (include FG, and show score for first 5 generations)
     molecule_list = []
     for i, mol in enumerate(molecules, 1):
         smiles, smiles_fg, score = mol
-        # Always show FG (even if empty string)
-        molecule_list.append(f"{i}. SMILES: {smiles} | Function group: {smiles_fg if smiles_fg else 'N/A'}")
+        molecule_list.append(f"{i}. SMILES: {smiles} {smiles_fg}")
     molecules_text = "\n".join(molecule_list)
 
     # GuacaMol task descriptions for context
@@ -349,7 +371,7 @@ def create_selection_prompt(task: str, generation: int, molecules: List[Tuple[st
     
     prompt = f"""You are a medicinal chemistry expert evaluating molecules for drug discovery.
 
-Task: {task_desc}
+{memory_block}Task: {task_desc}
 Generation: {generation}
 
 Below are {len(molecules)} molecules from a genetic algorithm optimization.
@@ -358,13 +380,13 @@ Your job is to select the 10 most promising molecules based on:
 2. Chemical feasibility and drug-likeness
 3. Structural diversity to maintain genetic diversity
 
-Give each molecule a quantitative score and use this score as the basis for screening
-
 Molecules:
 {molecules_text}
 
 Please select exactly 10 molecules that you believe are most promising for further optimization.
 Consider both high-scoring molecules and those with interesting structural features that could lead to better derivatives.
+
+Give each molecule a quantitative score(0~100) and use this score as the basis for screening
 
 After your reasoning, output ONLY a valid JSON array of exactly 10 integers on a new line. 
 Do not output any other text, explanation, or formatting. 
@@ -375,7 +397,6 @@ Example:
 [1,5,8,12,15,23,27,31,38,42]
 </json>
 """
-    
     return prompt
 
 def parse_llm_selection(response: str, max_molecules: int) -> List[int]:
@@ -518,7 +539,7 @@ def process_one_generation(args_tuple):
     response = llm_generate_and_log(llm, prompt, sampling_params, generation, candidate_molecules)
     idxs = parse_llm_selection(response, len(candidate_molecules))
     selected = [candidate_molecules[i] for i in idxs if 0 <= i < len(candidate_molecules)]
-    return generation, selected[:10]
+    return generation, selected[:10], response
 
 
 # --- New: Load completed generations from output CSV ---
@@ -564,13 +585,13 @@ def main():
                         help='Task name (e.g., celecoxib, osimertinib)')
     parser.add_argument('--llm_option', type=str, required=True, choices=['vllm', 'cerebras'],
                         help='Choose the LLM to use: vllm or cerebras')
-    parser.add_argument('--input_dir', type=str, default='results_graphga',
+    parser.add_argument('--input_dir', type=str, default='data/offspring',
                         help='Input directory containing {task}.csv')
-    parser.add_argument('--output_dir', type=str, default='results_llm_select',
+    parser.add_argument('--output_dir', type=str, default='results/results_qwen_3_235b_a22b',
                         help='Output directory for selected molecules')
     parser.add_argument('--fg_dir', type=str, default='data/functiongroup_offspring',
                         help='Directory containing functional‑group CSVs (generation, smiles_fg)')
-    parser.add_argument('--model', type=str, default='deepseek-ai/DeepSeek-R1-Distill-Llama-70B',
+    parser.add_argument('--model', type=str, default='qwen-3-235b-a22b-instruct-2507', # vllm deepseek-ai/DeepSeek-R1-Distill-Llama-70B
                         help='LLM model to use')
     parser.add_argument('--temperature', type=float, default=0.7,
                         help='Temperature for LLM sampling')
@@ -606,7 +627,7 @@ def main():
     parser.add_argument(
         '--max_generations',
         type=int,
-        default=None,
+        default=50,
         help='Maximum number of generations to include; default is all generations'
     )
     parser.add_argument('--pipeline_parallel_size', type=int, default=1,
@@ -705,14 +726,52 @@ def main():
             else:
                 raise RuntimeError("transformers is required for tokenizer length check.")
             max_model_len = args.max_model_len
-            with ThreadPoolExecutor(max_workers=args.concurrency) as exe:
-                futures = {exe.submit(process_one_generation, (llm, task, gen, mols, sampling_params, cfg, model, index, tokenizer, max_model_len)): gen for gen, mols in unfinished.items()}
-                for fut in as_completed(futures):
-                    gen, sel = fut.result()
-                    append_generation_to_csv(gen, sel, output_path)
+            # ---- Rolling reflection: track previous reasoning/oracle ----
+            prev_reasoning = None  # previous generation reasoning text
+            prev_oracles = None    # list[(smiles, score)] from previous gen
+            # Sequentially process generations in order
+            for gen in sorted(unfinished.keys()):
+                mols = unfinished[gen]
+                # Process current generation
+                _, sel, reasoning = process_one_generation((llm, task, gen, mols, sampling_params, cfg, model, index, tokenizer, max_model_len))
+                append_generation_to_csv(gen, sel, output_path)
+                # ---- Build reflection for previous generation (before current) ----
+                if prev_reasoning is not None and prev_oracles is not None:
+                    oracle_lines_prev = "\n".join([f"{i+1}. {sm} score {sc:.3f}" for i,(sm,_,sc) in enumerate(prev_oracles)])
+                    reflection_prompt = (
+                        "You are reviewing your previous molecule‑selection reasoning and the true oracle scores.\n"
+                        f"Previous reasoning:\n{prev_reasoning}\n\n"
+                        f"Oracle scores for your selected molecules:\n{oracle_lines_prev}\n\n"
+                        "Briefly (<=100 words) reflect on the mistakes or successes and how you will improve next generation."
+                    )
+                    reflection_resp = llm_generate_and_log(llm, reflection_prompt, sampling_params, gen, prev_oracles)
+                    MEMORY.save_context(reflection_resp)
+                # Update previous reasoning/oracles for next round
+                prev_reasoning = reasoning
+                prev_oracles = sel
         else:  # cerebras
+            # Rolling reflection: initialize previous variables
+            prev_reasoning = None
+            prev_oracles = None
             # Rotate keys for each generation when using Cerebras
             for generation, molecules in unfinished.items():
+                # ---- Build reflection from previous generation if exists ----
+                if prev_reasoning is not None and prev_oracles is not None:
+                    oracle_lines_prev = "\n".join([f"{i+1}. {sm} score {sc:.3f}" for i,(sm,_,sc) in enumerate(prev_oracles)])
+                    reflection_prompt = (
+                        "You are reviewing your previous molecule‑selection reasoning and the true oracle scores.\n"
+                        f"Previous reasoning:\n{prev_reasoning}\n\n"
+                        f"Oracle scores for your selected molecules:\n{oracle_lines_prev}\n\n"
+                        "Briefly (<=100 words) reflect on the mistakes or successes and how you will improve next generation."
+                    )
+                    reflection_msg = client.chat.completions.create(
+                        messages=[{"role":"user","content":reflection_prompt}],
+                        model=args.model,
+                        max_completion_tokens=256,
+                        temperature=0.2,
+                        top_p=1
+                    ).choices[0].message.content
+                    MEMORY.save_context(reflection_msg)
                 # Select next API key
                 current_key = api_keys[key_index]
                 client = Cerebras(api_key=current_key)
@@ -747,6 +806,9 @@ def main():
                 indices = parse_llm_selection(response, len(candidate_molecules))
                 selected_pool = [candidate_molecules[idx] for idx in indices if 0 <= idx < len(candidate_molecules)]
                 append_generation_to_csv(generation, selected_pool[:10], output_path)
+                # ---- Update previous reasoning and oracles for next reflection ----
+                prev_reasoning = response
+                prev_oracles = selected_pool[:10]
                 # 輪替 API key，每次 prompt/response 完就換下一個
                 key_index = (key_index + 1) % len(api_keys)
 
@@ -764,5 +826,5 @@ if __name__ == "__main__":
     main()
 
 '''
-python llm_select_with_fg.py --tasks amlodipine --input_dir data/offspring --output_dir results/results_qwen_3_235b_a22b --cerebras_api_keys "csk-yc5xd56kcxwc9x5y5rfc6mw95mfknd892mjjkhdyj39y898h" "csk-8f3ct6y23mw2fw3fdmyx8t4tx8rw8p85tdx9nrm8mv2t9m26" "csk-38kjr3mnp22x9w2m2wejdej5m55cpkwhmh3p6p6f3wt2wxw2" "csk-22c9dktpnx6yc94rpv4h8xp952nvcnypnmn36nrk3ym953yf" "csk-n58d54hd8njxfnd225fkvhyj8wd28v2t656eexecxt3mh6t4" --model qwen-3-235b-a22b --max_model_len 20000 --max_token 10000 --llm_option 'cerebras' --max_candidates 100 2>&1 | tee -a log/job_cerebras.log
+python llm_select_with_fg_reflexion.py --tasks amlodipine --input_dir data/offspring --output_dir results/results_qwen_3_235b_a22b     --cerebras_api_keys "csk-yc5xd56kcxwc9x5y5rfc6mw95mfknd892mjjkhdyj39y898h" "csk-8f3ct6y23mw2fw3fdmyx8t4tx8rw8p85tdx9nrm8mv2t9m26" "csk-38kjr3mnp22x9w2m2wejdej5m55cpkwhmh3p6p6f3wt2wxw2" "csk-22c9dktpnx6yc94rpv4h8xp952nvcnypnmn36nrk3ym953yf" "csk-n58d54hd8njxfnd225fkvhyj8wd28v2t656eexecxt3mh6t4"     --model qwen-3-235b-a22b-instruct-2507 --max_model_len 20000 --max_token 10000 --llm_option 'cerebras' --max_candidates 100 --max_generations 50 2>&1 | tee -a log/job_cerebras_with_fg.log
 '''

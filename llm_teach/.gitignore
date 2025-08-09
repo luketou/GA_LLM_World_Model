@@ -2,7 +2,8 @@
 *.log
 *.csv
 *.json
-farm_molecular_representation\
+farm_molecular_representation/
 *pkl
 *png
 *.o*
+.sh

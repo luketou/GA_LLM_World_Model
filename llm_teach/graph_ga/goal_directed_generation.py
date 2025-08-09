@@ -10,7 +10,6 @@ from typing import List, Optional
 
 import joblib
 import numpy as np
-from guacamol.goal_directed_benchmark import GoalDirectedBenchmark
 from guacamol.assess_goal_directed_generation import assess_goal_directed_generation
 from guacamol.goal_directed_generator import GoalDirectedGenerator
 from guacamol.scoring_function import ScoringFunction

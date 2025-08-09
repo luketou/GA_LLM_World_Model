@@ -1,3 +1,30 @@
+Directory structure:
+└── llm_teach/
+    ├── README.md
+    ├── analysis.py
+    ├── example_usage.py
+    ├── fg_analysis.py
+    ├── job_graphga.sh
+    ├── job_llm_select.sh
+    ├── job_llm_select2.sh
+    ├── jobs_cerebras.sh
+    ├── llm_select.py
+    ├── llm_select_fg_rag.py
+    ├── llm_select_with_fg_reflexion.py
+    ├── run_llm_selection.sh
+    ├── test_llm_select.py
+    ├── graph_ga/
+    │   ├── crossover.py
+    │   ├── goal_directed_generation.py
+    │   └── mutate.py
+    └── results/
+        ├── plot_generation_score.py
+        └── plot_results/
+            └── README
+
+================================================
+FILE: README.md
+================================================
 # 使用 LLM 協助分子篩選能力測試
 
 ## 核心理念
@@ -68,8 +95,6 @@ TASK_BENCHMARK_MAPPING = {
 ## Files Description
 - llm_select.py : select molecules via only task description and original smiles each generation
 - llm_select_with_fg.py : select molecules via 1. task description 2. original smiles 3. **function group** processed by FARM
-- llm_select_with_fg_reflexion.py : select molecules via task description, original smiles, function group, and LLM reflection.
-- llm_muvera_rl_critic.py : select molecules via task description, original smiles, function group, MUVERA-inspired RAG, and RL critic.
 - 
 
 ## Folder **Data** description
@@ -79,3 +104,5 @@ TASK_BENCHMARK_MAPPING = {
 
 ## 備註
 - Graph GA 會繪製 max/avg 曲線，並標示每代 LLM 選出的前十名分子。
+
+

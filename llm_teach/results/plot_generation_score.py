@@ -1,3 +1,6 @@
+'''
+python plot_generation_score.py --graphga_dir data/offspring --cerebras_dir results_llm_select results/results_qwen_3_235b_a22b --task amlodipine
+'''
 import os
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -91,19 +94,19 @@ def plot_comparison_lines(graphga_dir, cerebras_dir, task, max_generations):
 
     plt.xlabel('Generation')
     plt.ylabel('Normalized Score')
-    plt.title(f'50 Generations Score Comparison for {task} (Normalized)')
+    plt.title(f'50 Generations Score Comparison for {task} (Normalized) and reflection with RL')
     plt.legend()
     plt.tight_layout()
-    plt.savefig(f"{task}_generation_comparison.png")
+    plt.savefig(f"{task}_generation.png")
     plt.show()
 
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Compare generation scores from GraphGA and Cerebras CSV files.')
-    parser.add_argument('--graphga_dir', type=str, help='Directory for GraphGA result CSV files.',default='results_graphga')
-    parser.add_argument('--cerebras_dir', type=str, required=True, help='Directory for Cerebras result CSV files.')
-    parser.add_argument('--task', type=str,  help='Task name to plot scores for.',default='celecoxib')
-    parser.add_argument('--max_generations', type=int, default=None, help='Maximum number of generations to plot.')
+    parser.add_argument('--graphga_dir', type=str, help='Directory for GraphGA result CSV files.',default='data/offspring')
+    parser.add_argument('--cerebras_dir', type=str,  help='Directory for Cerebras result CSV files.',default='results/muvera_rl_critic_results')
+    parser.add_argument('--task', type=str,  help='Task name to plot scores for.',default='amlodipine')
+    parser.add_argument('--max_generations', type=int, default=50, help='Maximum number of generations to plot.')
     # example : python plot_generation_score.py --graphga_dir results_graphga --cerebras_dir results_llm_select results_cerebras --task fexofenadine
     args = parser.parse_args()
     plot_comparison_lines(args.graphga_dir, args.cerebras_dir, args.task, args.max_generations)
