@@ -7,3 +7,5 @@ farm_molecular_representation/
 *png
 *.o*
 .sh
+*.pt
+checkpoints/

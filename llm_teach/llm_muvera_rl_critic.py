@@ -195,10 +195,11 @@ class ValueFunction(nn.Module):
         self.network = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),
         )
 
     def forward(self, x):
@@ -210,25 +211,27 @@ class Critic(nn.Module):
         self.network1 = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),
         )
         self.network2 = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
+            nn.Dropout(0.1),
             nn.Linear(hidden_dim, 1),
-            nn.Sigmoid(),
         )
 
     def forward(self, x):
         return self.network1(x), self.network2(x)
 
 class ImplicitQLearning:
-    def __init__(self, value_fn, critic, value_optimizer, critic_optimizer, tau, gamma, expectile):
+    def __init__(self, value_fn, critic, value_optimizer, critic_optimizer, tau, gamma, expectile, lambda_rank=0.3):
         self.value_fn = value_fn
         self.critic = critic
         self.value_optimizer = value_optimizer
@@ -236,40 +239,74 @@ class ImplicitQLearning:
         self.tau = tau
         self.gamma = gamma
         self.expectile = expectile
+        self.lambda_rank = lambda_rank
         self.target_critic = Critic(critic.network1[0].in_features).to(DEVICE)
         self.target_critic.load_state_dict(critic.state_dict())
 
     def update(self, embeddings, rewards):
+        # embeddings: [B, D], rewards: [B, 1]
+        huber = nn.SmoothL1Loss()
+
         with torch.no_grad():
             next_v = self.value_fn(embeddings)
-            q1, q2 = self.critic(embeddings)
+            q1_t, q2_t = self.critic(embeddings)
 
-        # Update value function
+        # ----- Value function update (expectile + ranking) -----
         v = self.value_fn(embeddings)
+        q1, q2 = self.critic(embeddings)
         adv = torch.min(q1, q2) - v
-        value_loss = (self.expectile * (adv > 0).float() - (1 - self.expectile) * (adv < 0).float()) * adv.pow(2)
-        value_loss = value_loss.mean()
+        expectile_mask = (self.expectile * (adv > 0).float() - (1 - self.expectile) * (adv < 0).float())
+        value_loss = (expectile_mask * adv.pow(2)).mean()
+
+        # Pairwise ranking loss to enforce monotonicity w.r.t. rewards
+        # Build pair indices i,j where rewards[i] != rewards[j]
+        B = rewards.shape[0]
+        if B >= 2:
+            # Sample up to 1024 pairs for efficiency
+            idx_i = torch.randint(0, B, (min(1024, B * (B - 1) // 2),), device=embeddings.device)
+            idx_j = torch.randint(0, B, (idx_i.numel(),), device=embeddings.device)
+            mask = idx_i != idx_j
+            idx_i, idx_j = idx_i[mask], idx_j[mask]
+            ri, rj = rewards[idx_i], rewards[idx_j]
+            vi, vj = v[idx_i], v[idx_j]
+            # We want sign(ri - rj) == sign(vi - vj)
+            # Logistic ranking loss: log(1 + exp(-sign * (vi - vj)))
+            sign = torch.sign(ri - rj)
+            # Drop equal pairs
+            valid = sign != 0
+            if valid.any():
+                sign = sign[valid]
+                vi = vi[valid]
+                vj = vj[valid]
+                rank_loss = torch.log1p(torch.exp(-(sign * (vi - vj)))).mean()
+            else:
+                rank_loss = torch.zeros((), device=embeddings.device)
+        else:
+            rank_loss = torch.zeros((), device=embeddings.device)
+
+        total_value_loss = value_loss + self.lambda_rank * rank_loss
 
         self.value_optimizer.zero_grad()
-        value_loss.backward()
+        total_value_loss.backward(retain_graph=True)
         self.value_optimizer.step()
 
-        # Update critic
+        # ----- Critic update with Huber (SmoothL1) targets -----
         with torch.no_grad():
             target_q = rewards + self.gamma * next_v
 
         q1, q2 = self.critic(embeddings)
-        critic_loss = nn.MSELoss()(q1, target_q) + nn.MSELoss()(q2, target_q)
+        critic_loss = huber(q1, target_q) + huber(q2, target_q)
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
 
-        # Update target critic
+        # ----- Target critic Polyak update -----
         for param, target_param in zip(self.critic.parameters(), self.target_critic.parameters()):
             target_param.data.copy_(self.tau * param.data + (1 - self.tau) * target_param.data)
 
-        return value_loss.item(), critic_loss.item()
+        # Return scalar floats for logging
+        return (total_value_loss.detach().item(), critic_loss.detach().item())
 
     def get_embedding(self, molecule: Tuple[str, str]):
         """Generate a combined embedding for a molecule."""
@@ -537,7 +574,8 @@ def rl_critic_scoring(state: GraphState) -> GraphState:
     with torch.no_grad():
         for smiles, fg, _ in state['candidate_molecules']:
             embedding = iql.get_embedding((smiles, fg))
-            score = iql.value_fn(embedding.unsqueeze(0)).item()
+            raw = iql.value_fn(embedding.unsqueeze(0))
+            score = torch.sigmoid(raw).item()
             scores.append(score)
     return {**state, "critic_scores": scores}
 
@@ -777,8 +815,8 @@ def main():
     parser.add_argument('--fg_dir', type=str, default='data/functiongroup_offspring', help='Directory for functional group CSVs.')
     parser.add_argument('--model', type=str, default='gpt-oss-120b', help='Cerebras model name.')
     parser.add_argument('--temperature', type=float, default=0.7, help='LLM sampling temperature.')
-    parser.add_argument('--max_tokens', type=int, default=20000, help='Max tokens for LLM response.')
-    parser.add_argument('--max_model_len', type=int, default=4096, help='Maximum model context length.')
+    parser.add_argument('--max_tokens', type=int, default=30000, help='Max tokens for LLM response.')
+    parser.add_argument('--max_model_len', type=int, default=6096, help='Maximum model context length.')
     parser.add_argument('--max_generations', type=int, default=50, help='Max generations to process.')
     parser.add_argument('--cerebras_api_keys', nargs=5, required=True, help='Five Cerebras API keys to rotate.')
     args = parser.parse_args()
@@ -836,7 +874,8 @@ def main():
         critic_optimizer=critic_optimizer,
         tau=args.iql_tau,
         gamma=args.iql_gamma,
-        expectile=args.iql_expectile
+        expectile=args.iql_expectile,
+        lambda_rank=0.3
     )
 
     # --- Build LangGraph ---
