@@ -242,13 +242,14 @@ def dpo_loss(policy:GRULM, ref:GRULM, tok:CharSmilesTok, winners:List[str], lose
     w_ids, w_m = batchify(tok, winners, device)
     l_ids, l_m = batchify(tok, losers,  device)
     with torch.no_grad():
-        ref.eval()
-        lp_ref_w = ref.seq_logp(w_ids, w_m)
-        lp_ref_l = ref.seq_logp(l_ids, l_m)
+        unwrap_model(ref).eval()
+        lp_ref_w = unwrap_model(ref).seq_logp(w_ids, w_m)
+        lp_ref_l = unwrap_model(ref).seq_logp(l_ids, l_m)
     policy.train()
+    unwrap_model(policy).train()
     with autocast(enabled=torch.cuda.is_available()):
-        lp_pol_w = policy.seq_logp(w_ids, w_m)
-        lp_pol_l = policy.seq_logp(l_ids, l_m)
+        lp_pol_w = unwrap_model(policy).seq_logp(w_ids, w_m)
+        lp_pol_l = unwrap_model(policy).seq_logp(l_ids, l_m)
     margin = (lp_pol_w - lp_ref_w) - (lp_pol_l - lp_ref_l)  # [B]
     return -F.logsigmoid(beta * margin).mean()
 
@@ -310,9 +311,9 @@ def build_pairs_scored_adv(recs:List[Rec], delta_min:float, max_pairs:int, mode:
 @torch.no_grad()
 def dpo_proxy_score(policy:GRULM, ref:GRULM, tok:CharSmilesTok, seqs:List[str], device, len_penalty:float=0.0)->np.ndarray:
     ids, m = batchify(tok, seqs, device)
-    policy.eval(); ref.eval()
-    lp_pol = policy.seq_logp(ids, m)   # length-normalized
-    lp_ref = ref.seq_logp(ids, m)
+    unwrap_model(policy).eval(); unwrap_model(ref).eval()
+    lp_pol = unwrap_model(policy).seq_logp(ids, m)   # length-normalized
+    lp_ref = unwrap_model(ref).seq_logp(ids, m)
     margin = (lp_pol - lp_ref)
     if len_penalty and len_penalty != 0.0:
         L = m.sum(dim=1).float()
