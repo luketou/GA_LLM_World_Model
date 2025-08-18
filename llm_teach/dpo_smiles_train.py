@@ -346,6 +346,7 @@ def run_training(args):
     logf = None
     gt_f, pm_f, gt_writer, pm_writer = None, None, None, None
     met_f, met_writer = None, None
+    bin_f, bin_writer = None, None
     if is_main_process():
         if not getattr(args, "nosave", False):
             logf = open(os.path.join(args.out, "logs.txt"), "w", buffering=1)
@@ -361,9 +362,13 @@ def run_training(args):
             gt_writer = csv.writer(gt_f)
             pm_writer = csv.writer(pm_f)
             met_writer = csv.writer(met_f)
-            gt_writer.writerow(["generation", "smiles", "true_score"])
+            bin_path = os.path.join(args.out, "binary_selection.csv")
+            bin_f = open(bin_path, "w", newline="")
+            bin_writer = csv.writer(bin_f)
+            gt_writer.writerow(["generation", "smiles", "label"])
             pm_writer.writerow(["generation", "smiles", "proxy_margin"])
             met_writer.writerow(["generation", "k", "spearman", "kendall"])  # correlations within blind Top-K
+            bin_writer.writerow(["generation", "smiles", "label"])
     def log(msg):
         if is_main_process():
             print(msg)
@@ -521,11 +526,24 @@ def run_training(args):
         # Top-M prefilter for blind stage (by proxy), then take Top-K
         poolN = min(max(1, args.topM), len(order)) if args.topM and args.topM > 0 else len(order)
         orderM = order[:poolN]
-        top_idx = orderM[:min(args.topk, len(orderM))]
+        HARD_TOPK = 10
+        if len(orderM) < HARD_TOPK:
+            if is_main_process():
+                print(f"[WARN] Gen {g}: only {len(orderM)} candidates after prefilter; selecting all but hard cap is 10.")
+        top_idx = orderM[:min(HARD_TOPK, len(orderM))]
         top_smiles = [cand[i] for i in top_idx]
 
         if is_main_process():
             log(f"[Gen {g}] blind-selected top{len(top_smiles)}" + ("" if getattr(args,"nosave",False) else " and wrote proxy margins"))
+
+        # Write binary yes/no labels for all candidates of this generation
+        if is_main_process() and not getattr(args, "nosave", False):
+            # write binary labels for the whole generation
+            yes_set = set(top_smiles)
+            with open(os.path.join(args.out, "binary_selection.csv"), "a", newline="") as _fb:
+                _wb = csv.writer(_fb)
+                for s in cand:
+                    _wb.writerow([g, s, "yes" if s in yes_set else "no"])
 
         # ---- Rank-correlation within Top-K (only using revealed Top-K true scores) ----
         smi2score = {r.s: r.score for r in pool}
@@ -554,8 +572,9 @@ def run_training(args):
                     _wpm.writerow([g, cand[i], float(scores_proxy[i])])
             with open(ground_truth_path, "a", newline="") as _fgt:
                 _wgt = csv.writer(_fgt)
-                for s in top_smiles:
-                    _wgt.writerow([g, s, smi2score.get(s, "NA")])
+                yes_set = set(top_smiles)
+                for s in cand:
+                    _wgt.writerow([g, s, "yes" if s in yes_set else "no"])
             with open(metrics_path, "a", newline="") as _fm:
                 _wm = csv.writer(_fm); _wm.writerow([g, len(top_smiles), f"{spearman_val:.4f}", f"{kendall_val:.4f}"])
 
@@ -625,6 +644,7 @@ def run_training(args):
         if gt_f is not None: gt_f.close()
         if pm_f is not None: pm_f.close()
         if met_f is not None: met_f.close()
+        if 'bin_f' in locals() and bin_f is not None: bin_f.close()
 
     # return metrics for HPO
     mean_spear = (sum_spear / max(1, corr_count))
@@ -727,6 +747,8 @@ def optuna_objective(trial, base_args):
 def main():
     ap = build_argparser()
     args = ap.parse_args()
+    # Hard rule: exactly up to 10 selections per generation (cannot exceed 10)
+    args.topk = 10
 
     if args.optuna:
         if not HAS_OPTUNA:
