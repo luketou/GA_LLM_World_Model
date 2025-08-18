@@ -307,6 +307,78 @@ def build_pairs_scored_adv(recs:List[Rec], delta_min:float, max_pairs:int, mode:
             seen.add(p); uniq.append(p)
     return uniq
 
+# Build pairs only within a small Top-K set using a threshold (median / quantile) + epsilon buffer
+def build_pairs_from_topk_threshold(recs: List[Rec],
+                                    q: float = 0.5,
+                                    eps: float = 0.0,
+                                    max_pairs: int = 200,
+                                    seed: int = 0,
+                                    mode: str = "quantile") -> List[Tuple[str, str]]:
+    """
+    Split the given small candidate set (e.g., Top-10) into positive/negative by a
+    quantile threshold of true scores within this set, with an epsilon buffer:
+      - positives: score >= thr + eps
+      - negatives: score <= thr - eps
+    Pairs are (positive, negative). If one side is empty (degenerate), fall back to
+    pairing by score difference inside this set.
+    """
+    rng = random.Random(seed)
+    recs = [r for r in recs if legal(r.s)]
+    if len(recs) < 2:
+        return []
+
+    scores = np.array([r.score for r in recs], dtype=float)
+    mode = (mode or "quantile").lower()
+    if mode == "mean":
+        thr = float(np.mean(scores))
+        # Strict above/below by default; if eps>0, use buffer bands
+        if eps and eps > 0.0:
+            pos = [r for r in recs if r.score >= thr + eps]
+            neg = [r for r in recs if r.score <= thr - eps]
+        else:
+            pos = [r for r in recs if r.score > thr]
+            neg = [r for r in recs if r.score < thr]
+    else:
+        # Quantile split
+        # clip q into [0,1] just in case
+        q = float(min(1.0, max(0.0, q)))
+        thr = float(np.quantile(scores, q))
+        pos = [r for r in recs if r.score >= thr + eps]
+        neg = [r for r in recs if r.score <= thr - eps]
+
+        pairs: List[Tuple[str,str]] = []
+
+    if len(pos) == 0 or len(neg) == 0:
+        # Degenerate split (e.g., very tight scores). Fall back to score-gap pairing inside Top-K.
+        # Use a tiny delta to avoid duplicates; since Top-K is small, this is safe.
+        fallback_delta = 0.0 if len(recs) <= 3 else (max(scores) - min(scores)) * 0.05
+        sorted_recs = sorted(recs, key=lambda x: x.score, reverse=True)
+        head = sorted_recs[: max(1, len(sorted_recs)//2)]
+        tail = sorted_recs[max(1, len(sorted_recs)//2):]
+        for _ in range(max_pairs * 3):
+            if not head or not tail:
+                break
+            w = rng.choice(head); l = rng.choice(tail)
+            if w.s != l.s and (w.score - l.score) >= fallback_delta:
+                pairs.append((w.s, l.s))
+            if len(pairs) >= max_pairs:
+                break
+    else:
+        # Balanced sampling positives vs negatives
+        for _ in range(max_pairs * 3):
+            w = rng.choice(pos); l = rng.choice(neg)
+            if w.s != l.s:
+                pairs.append((w.s, l.s))
+            if len(pairs) >= max_pairs:
+                break
+
+    # deduplicate while preserving order
+    seen = set(); uniq: List[Tuple[str,str]] = []
+    for p in pairs:
+        if p not in seen:
+            seen.add(p); uniq.append(p)
+    return uniq[:max_pairs]
+
 # DPO "proxy reward" for blind selection with optional length penalty
 @torch.no_grad()
 def dpo_proxy_score(policy:GRULM, ref:GRULM, tok:CharSmilesTok, seqs:List[str], device, len_penalty:float=0.0)->np.ndarray:
@@ -581,9 +653,26 @@ def run_training(args):
         # Build pairs **only** from the selected Top-K (hard cap by user rule)
         selected_set = set(top_smiles)
         selected_recs = [r for r in pool if r.s in selected_set]
-        pairs_g = build_pairs_scored_adv(selected_recs, delta_min=args.delta_end,
-                                         max_pairs=min(args.pairs_per_epoch, 2000),
-                                         mode=args.pairs_mode, mix_alpha=args.mix_alpha, seed=args.seed+g)
+
+        # Within Top-K, split by quantile threshold (default median) + epsilon, then form (pos,neg) pairs.
+        pairs_g = build_pairs_from_topk_threshold(
+            selected_recs,
+            q=args.online_q,
+            eps=args.online_eps,
+            max_pairs=min(args.online_max_pairs, args.pairs_per_epoch, 2000),
+            seed=args.seed + g,
+            mode=args.online_thr_mode
+        )
+        # If still empty (rare), fall back to score-gap pairing within Top-K
+        if not pairs_g:
+            pairs_g = build_pairs_scored_adv(
+                selected_recs,
+                delta_min=args.delta_end,
+                max_pairs=min(args.pairs_per_epoch, 2000),
+                mode=args.pairs_mode,
+                mix_alpha=args.mix_alpha,
+                seed=args.seed + g
+            )
         pairs_g = shard_list(pairs_g, ddp_world_size(), ddp_rank())
         random.shuffle(pairs_g)
 
@@ -687,6 +776,13 @@ def build_argparser():
     ap.add_argument("--replay_k", type=int, default=5, help="use preference pairs from last K generations as replay (0 disables)")
     ap.add_argument("--ref_refresh", type=int, default=10, help="refresh reference model every N online generations (0: never)")
 
+    # online Top-K thresholding within revealed candidates
+    ap.add_argument("--online_thr_mode", type=str, default="mean", choices=["quantile","mean"], # mean 是以each generation avg 為切分好壞資料 quantile 則是鍾衛述
+                    help="threshold type for splitting Top-K into positive/negative: 'quantile' uses --online_q; 'mean' uses generation mean")
+    ap.add_argument("--online_q", type=float, default=0.5, help="quantile used when --online_thr_mode=quantile (e.g., 0.5 for median)")
+    ap.add_argument("--online_eps", type=float, default=0.0, help="epsilon buffer around threshold; with mean mode and eps=0 uses strict >/<")
+    ap.add_argument("--online_max_pairs", type=int, default=200, help="max pairs constructed within each generation's Top-K after thresholding")
+
     # LR schedule
     ap.add_argument("--cosine_schedule", action="store_true", help="enable cosine LR with warmup")
     ap.add_argument("--warmup_ratio", type=float, default=0.05, help="warmup ratio for cosine scheduler")
@@ -697,7 +793,7 @@ def build_argparser():
 
     # Optuna flags
     ap.add_argument("--optuna", action="store_true", help="use Optuna to tune hyperparameters")
-    ap.add_argument("--trials", type=int, default=20, help="number of Optuna trials")
+    ap.add_argument("--trials", type=int, default=100, help="number of Optuna trials")
     ap.add_argument("--study_name", type=str, default="dpo_hpo", help="Optuna study name")
     ap.add_argument("--storage", type=str, default="", help="Optuna storage URL (e.g., sqlite:///optuna.db)")
     ap.add_argument("--direction", type=str, default="maximize", choices=["maximize","minimize"], help="optimize mean_spearman_topk")
