@@ -328,6 +328,7 @@ def build_pairs_from_topk_threshold(recs: List[Rec],
         return []
 
     scores = np.array([r.score for r in recs], dtype=float)
+    pairs: List[Tuple[str,str]] = []
     mode = (mode or "quantile").lower()
     if mode == "mean":
         thr = float(np.mean(scores))
@@ -346,7 +347,6 @@ def build_pairs_from_topk_threshold(recs: List[Rec],
         pos = [r for r in recs if r.score >= thr + eps]
         neg = [r for r in recs if r.score <= thr - eps]
 
-        pairs: List[Tuple[str,str]] = []
 
     if len(pos) == 0 or len(neg) == 0:
         # Degenerate split (e.g., very tight scores). Fall back to score-gap pairing inside Top-K.
@@ -418,7 +418,7 @@ def run_training(args):
     logf = None
     gt_f, pm_f, gt_writer, pm_writer = None, None, None, None
     met_f, met_writer = None, None
-    bin_f, bin_writer = None, None
+    hist_f, hist_writer = None, None
     if is_main_process():
         if not getattr(args, "nosave", False):
             logf = open(os.path.join(args.out, "logs.txt"), "w", buffering=1)
@@ -434,13 +434,13 @@ def run_training(args):
             gt_writer = csv.writer(gt_f)
             pm_writer = csv.writer(pm_f)
             met_writer = csv.writer(met_f)
-            bin_path = os.path.join(args.out, "binary_selection.csv")
-            bin_f = open(bin_path, "w", newline="")
-            bin_writer = csv.writer(bin_f)
-            gt_writer.writerow(["generation", "smiles", "label"])
+            hist_path = os.path.join(args.out, "all_history.csv")
+            hist_f = open(hist_path, "w", newline="")
+            hist_writer = csv.writer(hist_f)
+            gt_writer.writerow(["generation", "smiles", "score"])
             pm_writer.writerow(["generation", "smiles", "proxy_margin"])
             met_writer.writerow(["generation", "k", "spearman", "kendall"])  # correlations within blind Top-K
-            bin_writer.writerow(["generation", "smiles", "label"])
+            hist_writer.writerow(["generation", "smiles", "label", "score"])
     def log(msg):
         if is_main_process():
             print(msg)
@@ -581,6 +581,27 @@ def run_training(args):
     # ---------- Stage B: online loop over subsequent generations ----------
     replay = deque(maxlen=max(0, args.replay_k)) if args.replay_k > 0 else None
 
+    # Optionally pre-build warm pairs using per-generation mean threshold and mix into every online step
+    warm_pairs_all: List[Tuple[str,str]] = []
+    if getattr(args, "mix_warm_into_online", False):
+        by_gen: Dict[int, List[Rec]] = {}
+        for r in warm:
+            by_gen.setdefault(r.gen, []).append(r)
+        for g_w, recs_w in sorted(by_gen.items()):
+            # Use mean-based split per generation, no Top-K restriction for warm mixing
+            ps = build_pairs_from_topk_threshold(
+                recs_w,
+                q=0.5,
+                eps=args.online_eps,
+                max_pairs=min(args.online_max_pairs, args.pairs_per_epoch, 2000),
+                seed=args.seed + g_w,
+                mode="mean",
+            )
+            if ps:
+                warm_pairs_all.extend(ps)
+        if is_main_process():
+            log(f"[Warm-Mix] Added {len(warm_pairs_all)} pairs from warm generations into online training")
+
     # accumulators for HPO metric
     sum_spear = 0.0; sum_kend = 0.0; corr_count = 0
     sum_online_loss = 0.0; online_loss_count = 0
@@ -609,13 +630,15 @@ def run_training(args):
             log(f"[Gen {g}] blind-selected top{len(top_smiles)}" + ("" if getattr(args,"nosave",False) else " and wrote proxy margins"))
 
         # Write binary yes/no labels for all candidates of this generation
+        smi2score = {r.s: r.score for r in pool}
         if is_main_process() and not getattr(args, "nosave", False):
-            # write binary labels for the whole generation
-            yes_set = set(top_smiles)
-            with open(os.path.join(args.out, "binary_selection.csv"), "a", newline="") as _fb:
+            # write full decision history (all candidates with yes/no and oracle score)
+            history_path = os.path.join(args.out, "all_history.csv")
+            with open(history_path, "a", newline="") as _fb:
                 _wb = csv.writer(_fb)
+                yes_set = set(top_smiles)
                 for s in cand:
-                    _wb.writerow([g, s, "yes" if s in yes_set else "no"])
+                    _wb.writerow([g, s, "yes" if s in yes_set else "no", smi2score.get(s, float("nan"))])
 
         # ---- Rank-correlation within Top-K (only using revealed Top-K true scores) ----
         smi2score = {r.s: r.score for r in pool}
@@ -645,8 +668,8 @@ def run_training(args):
             with open(ground_truth_path, "a", newline="") as _fgt:
                 _wgt = csv.writer(_fgt)
                 yes_set = set(top_smiles)
-                for s in cand:
-                    _wgt.writerow([g, s, "yes" if s in yes_set else "no"])
+                for s in top_smiles:
+                    _wgt.writerow([g, s, "yes", smi2score.get(s, float("nan"))])
             with open(metrics_path, "a", newline="") as _fm:
                 _wm = csv.writer(_fm); _wm.writerow([g, len(top_smiles), f"{spearman_val:.4f}", f"{kendall_val:.4f}"])
 
@@ -678,6 +701,9 @@ def run_training(args):
 
         # ---- Fixed number of optimizer steps + optional replay ----
         train_pairs = list(pairs_g)
+        # Mix in ALL warm pairs if requested
+        if warm_pairs_all:
+            train_pairs.extend(warm_pairs_all)
         if replay is not None:
             for buf in replay:
                 train_pairs.extend(buf)
@@ -733,7 +759,7 @@ def run_training(args):
         if gt_f is not None: gt_f.close()
         if pm_f is not None: pm_f.close()
         if met_f is not None: met_f.close()
-        if 'bin_f' in locals() and bin_f is not None: bin_f.close()
+        if 'hist_f' in locals() and hist_f is not None: hist_f.close()
 
     # return metrics for HPO
     mean_spear = (sum_spear / max(1, corr_count))
@@ -766,7 +792,7 @@ def build_argparser():
 
     # blind selection & pairing knobs
     ap.add_argument("--topk", type=int, default=10, help="blind selection per generation")
-    ap.add_argument("--topM", type=int, default=100, help="prefilter pool size before taking top-k")
+    ap.add_argument("--topM", type=int, default=30, help="prefilter pool size before taking top-k")
     ap.add_argument("--proxy_len_penalty", type=float, default=0.0, help="subtract lambda*length from proxy margin during blind selection")
     ap.add_argument("--pairs_mode", type=str, default="mix", choices=["stratified","hard","mix"], help="pairing strategy for scored data")
     ap.add_argument("--mix_alpha", type=float, default=0.7, help="if pairs_mode=mix, probability of stratified vs hard (alpha=stratified)")
@@ -790,6 +816,10 @@ def build_argparser():
     # dist/amp
     ap.add_argument("--dist", action="store_true", help="enable DistributedDataParallel via torchrun")
     ap.add_argument("--amp", action="store_true", help="enable CUDA AMP mixed precision")
+
+    # mix warm generations into online training using per-generation mean threshold
+    ap.add_argument("--mix_warm_into_online", action="store_true",
+                    help="mix all warm generations' pairs (split by per-generation mean) into every online step")
 
     # Optuna flags
     ap.add_argument("--optuna", action="store_true", help="use Optuna to tune hyperparameters")

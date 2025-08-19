@@ -80,7 +80,7 @@ exec torchrun --standalone --nproc_per_node=${NPROC} \
     --lr "${LR}" \
     --cosine_schedule --warmup_ratio 0.05 \
     --amp \
-    --layers 6 \
+    --layers 8 \
     --dist 2>&1 | tee log/dpo_training.log
 
 
