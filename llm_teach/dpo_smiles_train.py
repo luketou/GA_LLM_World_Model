@@ -200,6 +200,45 @@ def init_distributed(backend: str = "nccl"):
         except Exception:
             pass
 
+# ---- Helper: args_to_dict and model_summary ----
+def args_to_dict(args):
+    """Convert argparse.Namespace to a stable, sorted dict for printing/logging."""
+    d = dict(vars(args))
+    return dict(sorted(d.items()))
+
+def model_summary(model: nn.Module) -> Dict[str, object]:
+    """
+    Return a summary dict for the model: class, param counts, buffers, modules, and key details.
+    """
+    m = unwrap_model(model)
+    total_params = sum(p.numel() for p in m.parameters())
+    trainable_params = sum(p.numel() for p in m.parameters() if p.requires_grad)
+    buffers = sum(1 for _ in m.buffers())
+    modules = sum(1 for _ in m.modules())
+    details = {}
+    # Embedding details
+    if hasattr(m, "embed") and isinstance(m.embed, nn.Embedding):
+        details["embedding.num_embeddings"] = getattr(m.embed, "num_embeddings", None)
+        details["embedding.embedding_dim"] = getattr(m.embed, "embedding_dim", None)
+    # RNN details
+    if hasattr(m, "gru") and isinstance(m.gru, nn.GRU):
+        details["rnn.input_size"] = getattr(m.gru, "input_size", None)
+        details["rnn.hidden_size"] = getattr(m.gru, "hidden_size", None)
+        details["rnn.num_layers"] = getattr(m.gru, "num_layers", None)
+        details["rnn.dropout"] = getattr(m.gru, "dropout", None)
+    # Head details
+    if hasattr(m, "head") and isinstance(m.head, nn.Linear):
+        details["head.in_features"] = getattr(m.head, "in_features", None)
+        details["head.out_features"] = getattr(m.head, "out_features", None)
+    return {
+        "class": m.__class__.__name__,
+        "total_params": total_params,
+        "trainable_params": trainable_params,
+        "buffers": buffers,
+        "modules": modules,
+        "details": details,
+    }
+
 # --------------- Utilities ----------------
 def set_seed(seed:int):
     random.seed(seed); np.random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
@@ -415,6 +454,28 @@ def build_cosine_warmup_scheduler(optimizer, total_steps:int, warmup_ratio:float
 def run_training(args):
     os.makedirs(args.out, exist_ok=True)
     ckdir = os.path.join(args.out, "checkpoints"); os.makedirs(ckdir, exist_ok=True)
+    # --- Pre-log buffer for config/env info ---
+    pre_logs = []
+    # Dump args config and env snapshot
+    args_dump = json.dumps(args_to_dict(args), indent=2, sort_keys=True)
+    if is_main_process():
+        pre_logs.append("[CONFIG] Arguments")
+        pre_logs.extend(args_dump.splitlines())
+        cuda_env = {
+            "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
+            "LOCAL_RANK": os.environ.get("LOCAL_RANK", ""),
+            "RANK": os.environ.get("RANK", ""),
+            "WORLD_SIZE": os.environ.get("WORLD_SIZE", ""),
+        }
+        pre_logs.append("[CONFIG] CUDA environment snapshot:")
+        for k, v in cuda_env.items():
+            pre_logs.append(f"  {k}={v}")
+        # Print to stdout immediately
+        print("[CONFIG] Arguments")
+        print(args_dump)
+        print("[CONFIG] CUDA environment snapshot:")
+        for k, v in cuda_env.items():
+            print(f"  {k}={v}")
     logf = None
     gt_f, pm_f, gt_writer, pm_writer = None, None, None, None
     met_f, met_writer = None, None
@@ -437,10 +498,14 @@ def run_training(args):
             hist_path = os.path.join(args.out, "all_history.csv")
             hist_f = open(hist_path, "w", newline="")
             hist_writer = csv.writer(hist_f)
-            gt_writer.writerow(["generation", "smiles", "score"])
+            gt_writer.writerow(["generation", "smiles","label","score"])
             pm_writer.writerow(["generation", "smiles", "proxy_margin"])
             met_writer.writerow(["generation", "k", "spearman", "kendall"])  # correlations within blind Top-K
             hist_writer.writerow(["generation", "smiles", "label", "score"])
+        # Immediately flush pre_logs to logf if available
+        if logf is not None and pre_logs:
+            for line in pre_logs:
+                print(line, file=logf)
     def log(msg):
         if is_main_process():
             print(msg)
@@ -504,6 +569,12 @@ def run_training(args):
         policy = DDP(policy, device_ids=[dev_id] if dev_id is not None else None,
                      output_device=dev_id if dev_id is not None else None,
                      find_unused_parameters=False)
+
+    # Print/log model summary after log() is defined
+    ms = model_summary(policy)
+    if is_main_process():
+        log("[MODEL] Summary")
+        log(json.dumps(ms, indent=2, sort_keys=True))
 
     opt = torch.optim.AdamW(unwrap_model(policy).parameters(), lr=args.lr, betas=(0.9,0.95), weight_decay=0.01)
     scaler = GradScaler(enabled=(args.amp and torch.cuda.is_available()))
@@ -625,6 +696,9 @@ def run_training(args):
                 print(f"[WARN] Gen {g}: only {len(orderM)} candidates after prefilter; selecting all but hard cap is 10.")
         top_idx = orderM[:min(HARD_TOPK, len(orderM))]
         top_smiles = [cand[i] for i in top_idx]
+        
+        true_scores_topk  = [pool[i].score for i in [pool.index(next(r for r in pool if r.s == cand[j])) for j in top_idx]]
+        proxy_scores_topk = [float(scores_proxy[j]) for j in top_idx]
 
         if is_main_process():
             log(f"[Gen {g}] blind-selected top{len(top_smiles)}" + ("" if getattr(args,"nosave",False) else " and wrote proxy margins"))
@@ -848,7 +922,7 @@ def optuna_objective(trial, base_args):
     a.replay_k = trial.suggest_int("replay_k", 0, 30)
     a.ref_refresh = trial.suggest_int("ref_refresh", 2, 10)
     a.proxy_len_penalty = trial.suggest_float("proxy_len_penalty", 0.0, 0.01)
-    a.topM = trial.suggest_int("topM", 30)
+    a.topM = trial.suggest_int("topM", max(10, base_args.topk), 200, step=5)
 
     # HPO 過程精簡輸出、不落地檔案
     a.nosave = True
@@ -860,6 +934,29 @@ def optuna_objective(trial, base_args):
     # 隔離trial輸出目錄（nosave=True時不會真的寫內容）
     a.out = os.path.join(base_args.out, f".optuna_trial_{trial.number}")
 
+    # Logging for Optuna
+    trial_log_path = os.path.join(base_args.out, "optuna.log")
+    os.makedirs(base_args.out, exist_ok=True)
+    # After sampling, build params dict
+    params_dict = {
+        "lr": a.lr,
+        "beta": a.beta,
+        "delta_start": a.delta_start,
+        "delta_end": a.delta_end,
+        "pairs_per_epoch": a.pairs_per_epoch,
+        "mix_alpha": a.mix_alpha,
+        "pairs_mode": a.pairs_mode,
+        "online_steps": a.online_steps,
+        "replay_k": a.replay_k,
+        "ref_refresh": a.ref_refresh,
+        "proxy_len_penalty": a.proxy_len_penalty,
+        "topM": a.topM,
+    }
+    params_line = f"[Optuna][trial {trial.number}] params=" + json.dumps(params_dict, sort_keys=True)
+    print(params_line)
+    with open(trial_log_path, "a") as f:
+        f.write(params_line + "\n")
+
     # run and get metric
     result = run_training(a)
     # 主目標：讓盲選 Top-K 的 Spearman 平均越好越好
@@ -867,6 +964,10 @@ def optuna_objective(trial, base_args):
     # 同步記錄次要指標
     trial.set_user_attr("mean_kendall_topk", result.get("mean_kendall_topk", float("nan")))
     trial.set_user_attr("mean_online_loss", result.get("mean_online_loss", float("nan")))
+    result_line = f"[Optuna][trial {trial.number}] result mean_spearman_topk={result.get('mean_spearman_topk', float('nan'))}, mean_kendall_topk={result.get('mean_kendall_topk', float('nan'))}, mean_online_loss={result.get('mean_online_loss', float('nan'))}"
+    print(result_line)
+    with open(trial_log_path, "a") as f:
+        f.write(result_line + "\n")
     return obj
 
 # ---------------- Entrypoint ----------------
@@ -875,6 +976,12 @@ def main():
     args = ap.parse_args()
     # Hard rule: exactly up to 10 selections per generation (cannot exceed 10)
     args.topk = 10
+
+    # Print startup configuration
+    cfg = json.dumps(args_to_dict(args), indent=2, sort_keys=True)
+    print("[CONFIG] Launch args:\n" + cfg)
+    if getattr(args, "optuna", False):
+        print(f"[Optuna] study_name={args.study_name}, trials={args.trials}, direction={args.direction}, storage='{args.storage or 'memory'}'")
 
     if args.optuna:
         if not HAS_OPTUNA:

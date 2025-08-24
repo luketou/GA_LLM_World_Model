@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =================== PBS directives ===================
-#PBS -l select=1:ncpus=8:ngpus=1
+#PBS -l select=1:ncpus=24:ngpus=3
 
 #PBS -q gpu
 #PBS -j oe
@@ -11,7 +11,7 @@ START_TIME=$SECONDS
 
 # ======== Basic config (edit as needed) ========
 CSV_PATH=${CSV_PATH:-data/offspring/amlodipine.csv}
-OUTDIR=${OUTDIR:-results/DPO_results}
+OUTDIR=${OUTDIR:-results/DPO_results_optuna}
 WARMUP_GENS=${WARMUP_GENS:-30}
 EPOCHS=${EPOCHS:-16}
 DELTA_START=${DELTA_START:-0.05}
@@ -64,15 +64,26 @@ exec torchrun --standalone --nproc_per_node=${NPROC} \
   dpo_smiles_train.py \
     --csv "${CSV_PATH}" \
     --out "${OUTDIR}" \
-    --warmup_gens 30 --epochs 16 \
-    --delta_start 0.10 --delta_end 0.04 \
-    --pairs_per_epoch 12000 --beta 0.30 \
+    --warmup_gens "${WARMUP_GENS}" \
+    --epochs "${EPOCHS}" \
+    --delta_start "${DELTA_START}" \
+    --delta_end "${DELTA_END}" \
+    --pairs_per_epoch "${PAIRS_PER_EPOCH}" \
+    --beta "${BETA}" \
     --pairs_mode hard --mix_alpha 0.7 \
-    --online_steps 120 --replay_k 8 --ref_refresh 6 \
-    --proxy_len_penalty 0.0 --topM 60 --topk 10 \
-    --lr 1e-4 --cosine_schedule --warmup_ratio 0.05 \
-    --amp --layers 8 --dist \
-    2>&1 | tee log/dpo_training.log
+    --online_steps "${ONLINE_STEPS}" \
+    --replay_k "${REPLAY_K}" \
+    --ref_refresh "${REF_REFRESH}" \
+    --proxy_len_penalty "${PROXY_LEN_PENALTY}" \
+    --topM "${TOPM}" \
+    --topk "${TOPK}" \
+    --lr "${LR}" \
+    --cosine_schedule --warmup_ratio 0.05 \
+    --amp \
+    --layers 8 \
+    --dist  \
+    --optuna \
+    2>&1 | tee log/dpo_training_optuna.log
 
 
 ELAPSED_TIME=$(($SECONDS - $START_TIME))
