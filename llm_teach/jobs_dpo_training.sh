@@ -65,12 +65,12 @@ exec torchrun --standalone --nproc_per_node=${NPROC} \
     --csv "${CSV_PATH}" \
     --out "${OUTDIR}" \
     --warmup_gens 30 --epochs 16 \
-    --delta_start 0.10 --delta_end 0.04 \
-    --pairs_per_epoch 12000 --beta 0.30 \
-    --pairs_mode hard --mix_alpha 0.7 \
-    --online_steps 120 --replay_k 8 --ref_refresh 6 \
-    --proxy_len_penalty 0.0 --topM 60 --topk 10 \
-    --lr 1e-4 --cosine_schedule --warmup_ratio 0.05 \
+    --delta_start 0.07587945476302646 --delta_end 0.02993292420985183 \
+    --pairs_per_epoch 1300 --beta 0.5728928685254538 \
+    --pairs_mode hard --mix_alpha 0.3935967122017216 \
+    --online_steps 450 --replay_k 0 --ref_refresh 10 \
+    --proxy_len_penalty 0.008324426408004218 --topM 50 --topk 10 \
+    --lr 0.0002805758207667253 --cosine_schedule --warmup_ratio 0.05 \
     --amp --layers 8 --dist \
     2>&1 | tee log/dpo_training.log
 
