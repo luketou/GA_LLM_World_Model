@@ -9,3 +9,4 @@ farm_molecular_representation/
 .sh
 *.pt
 checkpoints/
+*.jsonl

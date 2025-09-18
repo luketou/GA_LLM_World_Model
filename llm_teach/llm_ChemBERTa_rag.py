@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import os, sys, json, argparse, random, math, pickle, time
+import platform
 from dataclasses import dataclass
 from typing import List, Dict, Tuple, Optional
 
@@ -16,12 +17,38 @@ except Exception:
     HAS_FAISS = False
 
 # ---------- Torch / HF ----------
-import torch
+# Preemptively disable CUDA on systems with old glibc (<2.27) to avoid CUDA preload at import
+def _glibc_version_tuple():
+    name, ver = platform.libc_ver()
+    if not ver:
+        return (0, 0)
+    parts = ver.split(".")
+    try:
+        major = int(parts[0]) if len(parts) > 0 else 0
+        minor = int(parts[1]) if len(parts) > 1 else 0
+        return (major, minor)
+    except Exception:
+        return (0, 0)
+
+if _glibc_version_tuple() < (2, 27) or os.environ.get("PYTORCH_FORCE_CPU", ""):
+    os.environ.setdefault("PYTORCH_NO_CUDA", "1")
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+
+# Robust import: fall back to CPU-only if CUDA deps are missing
+try:
+    import torch
+except Exception as _e:  # GLIBC/libcublas/libcurand errors on older systems
+    import importlib as _importlib
+    os.environ.setdefault("PYTORCH_NO_CUDA", "1")
+    os.environ.setdefault("CUDA_VISIBLE_DEVICES", "")
+    sys.modules.pop("torch", None)
+    torch = _importlib.import_module("torch")
 from transformers import AutoTokenizer, AutoModel
 
 # ---------- RDKit ----------
 from rdkit import Chem
 from rdkit.Chem import AllChem
+from rdkit.Chem import rdFingerprintGenerator
 from rdkit import DataStructs
 
 # ---------- LLM backends (optional) ----------
@@ -45,7 +72,7 @@ class Rec:
     smiles: str
     score: float
 
-def read_task_csv(path: str) -> Dict[int, List[Rec]]:
+def read_task_csv(path: str, max_generation: Optional[int] = None) -> Dict[int, List[Rec]]:
     df = pd.read_csv(path)
     need = {"generation","smiles","score"}
     assert need.issubset(df.columns), f"CSV must have columns {need}"
@@ -53,6 +80,8 @@ def read_task_csv(path: str) -> Dict[int, List[Rec]]:
     for _, r in df.iterrows():
         try:
             g = int(r["generation"]); s = str(r["smiles"]); sc = float(r["score"])
+            if max_generation is not None and g > int(max_generation):
+                continue
             out.setdefault(g, []).append(Rec(generation=g, smiles=s, score=sc))
         except Exception:
             continue
@@ -89,6 +118,12 @@ class ChemEncoder:
         self.random_smiles_n = int(random_smiles_n)
         assert dense_pool in ("mean","cls")
         self.dense_pool = dense_pool
+        try:
+            self.fp_gen = rdFingerprintGenerator.GetMorganGenerator(radius=self.fp_radius, fpSize=self.fp_bits)
+            self._use_fp_generator = True
+        except Exception:
+            self.fp_gen = None
+            self._use_fp_generator = False
         # cache: smi -> {"dense":np.float32[D], "fp":bool[B], "on":int}
         self.cache: Dict[str, Dict[str, object]] = {}
 
@@ -111,7 +146,10 @@ class ChemEncoder:
         if m is None:
             arr = np.zeros((self.fp_bits,), dtype=np.uint8)
             return arr.astype(bool), 0
-        fp = AllChem.GetMorganFingerprintAsBitVect(m, self.fp_radius, nBits=self.fp_bits)
+        if getattr(self, '_use_fp_generator', False) and self.fp_gen is not None:
+            fp = self.fp_gen.GetFingerprint(m)
+        else:
+            fp = AllChem.GetMorganFingerprintAsBitVect(m, self.fp_radius, nBits=self.fp_bits)
         arr = np.zeros((self.fp_bits,), dtype=np.uint8)
         DataStructs.ConvertToNumpyArray(fp, arr)
         on = int(arr.sum())
@@ -510,8 +548,13 @@ def build_evidence_for_generation(
 # ------------------- Main pipeline -------------------
 def run(args):
     # 讀入 CSV
-    gens = read_task_csv(args.csv)
+    gens = read_task_csv(args.csv, max_generation=args.max_generation)
     print(f"[Input] generations={len(gens)}, total={sum(len(v) for v in gens.values())}")
+
+    score_lookup = {}
+    for _g, _recs in gens.items():
+        for _r in _recs:
+            score_lookup[(_g, _r.smiles)] = _r.score
 
     # Encoder
     enc = ChemEncoder(
@@ -572,7 +615,7 @@ def run(args):
     # 輸出檔
     sel_path = os.path.join(args.outdir, "selected_top10.csv")
     with open(sel_path, "w", newline="") as f:
-        w = pd.DataFrame(columns=["generation","smiles","rank_final"]).to_csv(f, index=False)
+        pd.DataFrame(columns=["generation","smiles","rank_final","score"]).to_csv(f, index=False)
 
     evidence_path = os.path.join(args.outdir, "retrieved_evidence.jsonl")
     ev_f = open(evidence_path, "w", encoding="utf-8")
@@ -591,15 +634,26 @@ def run(args):
 
         # 構建 prompt → LLM
         prompt = make_llm_prompt(g, args.task, cands, alpha, beta, few_shot=None)
+        print(f"[Prompt Gen {g}] >>>")
+        print(prompt)
         raw = llm.generate(prompt)
+        print(f"[LLM Output Gen {g}] <<<")
+        print(raw)
         idx10 = parse_llm_selection(raw, max_idx=len(cands))
         if len(idx10) != 10:
             # 嚴格兜底：按 hybrid 排序取前 10
             idx10 = [c["idx"] for c in sorted(cands, key=lambda x:-x["hybrid"])[:10]]
 
         # 寫 selected_top10
-        rows = [{"generation": g, "smiles": cands[i-1]["smiles"], "rank_final": r+1}
-                for r,i in enumerate(idx10)]
+        rows = []
+        for r, i in enumerate(idx10):
+            smi = cands[i-1]["smiles"]
+            rows.append({
+                "generation": g,
+                "smiles": smi,
+                "rank_final": r + 1,
+                "score": score_lookup.get((g, smi))
+            })
         pd.DataFrame(rows).to_csv(sel_path, mode="a", header=False, index=False)
 
         # ---- 線上更新記憶庫：把「當代全部 30」加入（含真分數），供下一代檢索 ----
@@ -620,11 +674,14 @@ def run(args):
 def build_argparser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", type=str, default="amlodipine")
-    ap.add_argument("--csv", type=str, help="path to CSV: generation,smiles,score", default="")
+    ap.add_argument("--csv", type=str, help="path to CSV: generation,smiles,score", default="data/offspring/amlodipine.csv")
     ap.add_argument("--outdir", type=str, default="results/ChemBERTa_RAG")
+    ap.add_argument("--max-generation", dest="max_generation", type=int, default=None,
+                    help="Only load/process generations <= this value")
     # encoder / fingerprints
     ap.add_argument("--model-name", type=str, default="seyonec/ChemBERTa-zinc-base-v1")
-    ap.add_argument("--device", type=str, default=("cuda" if torch.cuda.is_available() else "cpu"))
+    # Default to CPU to avoid touching torch at arg-parse time on old systems
+    ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--dense-pool", type=str, default="mean", choices=["mean","cls"])
     ap.add_argument("--random-smiles-n", type=int, default=4)
     ap.add_argument("--ecfp-bits", type=int, default=2048)
