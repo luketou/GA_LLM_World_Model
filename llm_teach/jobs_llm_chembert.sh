@@ -39,7 +39,7 @@ print('torch.cuda.is_available=', torch.cuda.is_available())
 print('torch.cuda.device_count=', torch.cuda.device_count())
 PY
 
-python llm_ChemBERTa_rag.py \
+python llm_ChemBERTa_rag2.py \
   --cerebras-api-keys \
     "csk-yc5xd56kcxwc9x5y5rfc6mw95mfknd892mjjkhdyj39y898h" \
     "csk-8f3ct6y23mw2fw3fdmyx8t4tx8rw8p85tdx9nrm8mv2t9m26" \
@@ -47,6 +47,7 @@ python llm_ChemBERTa_rag.py \
     "csk-22c9dktpnx6yc94rpv4h8xp952nvcnypnmn36nrk3ym953yf" \
     "csk-n58d54hd8njxfnd225fkvhyj8wd28v2t656eexecxt3mh6t4" \
     --device "$DEVICE" \
+    --calibrate --calibrate-interval 5 --calibrate-window 30 --calibrate-min-history 3 \
   --max-generation 100 2>&1 | tee -a log/job_llm_chemBERT.log
 
 ELAPSED_TIME=$((SECONDS - START_TIME))

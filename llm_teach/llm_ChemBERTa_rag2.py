@@ -262,6 +262,7 @@ def calibrate_alpha_beta(
     proto_window: int = 5,
     topK: int = 30
 ) -> Tuple[float,float]:
+    # NOTE: This function remains unchanged. A more advanced version could also calibrate gamma.
     # 為簡潔，我們用「與上一代原型的 dense/sparse 相似度」去回歸當代的 min-max 分數
     # 冷啟：若資料不足則回傳 (0.6, 0.4)
     g_list = [g for g in sorted(gens.keys()) if start_gen <= g <= end_gen and len(gens[g])>0]
@@ -339,27 +340,36 @@ def calibrate_alpha_beta(
     return float(w[0]/w.sum()), float(w[1]/w.sum())
 
 # ------------------- LLM prompt & parsing -------------------
+# MODIFIED: Implemented Chain-of-Thought and added diversity score to the prompt
 def make_llm_prompt(g:int,
                     task:str,
                     candidates: List[Dict],
                     alpha: float,
                     beta: float,
+                    gamma: float, # NEW
                     few_shot: Optional[List[str]] = None) -> str:
     """
     candidates: list of dict per candidate:
-      { 'idx':1-based, 'smiles', 'dense_proto', 'sparse_proto', 'hybrid',
+      { 'idx':1-based, 'smiles', 'dense_proto', 'sparse_proto', 'diversity', 'hybrid',
         'neighbors':[{'smiles','score','dense_sim','tanimoto'} * up to 5] }
     """
     head = (
-f"You are a medicinal chemistry expert selecting molecules for task: {task}.\n"
-f"You are given 30 candidate SMILES of generation {g}. Each candidate includes:\n"
-"- dense_proto: cosine similarity to prototype aggregate (ChemBERTa)\n"
-"- sparse_proto: ECFP Tanimoto to prototypes\n"
-"- hybrid = {alpha:.2f}*dense_proto + {beta:.2f}*sparse_proto\n"
-"- up to 5 historical nearest neighbors with their oracle scores\n"
-"Only use past generations' scores. Do NOT assume any score for current generation.\n"
-"Select EXACTLY 10 indices (1..30) that are promising for further optimization, balancing score potential and structural diversity.\n"
-"Return ONLY a JSON array of 10 integers (no other text).\n"
+f"You are a medicinal chemistry expert selecting molecules for the task: {task}.\n"
+f"You are given {len(candidates)} candidate SMILES from generation {g}. Each candidate includes several metrics:\n"
+f"- dense_proto: Similarity to past successful molecules (semantic, ChemBERTa).\n"
+f"- sparse_proto: Structural feature similarity to past successful molecules (ECFP Tanimoto).\n"
+f"- diversity: A score from 0 to 1 indicating how structurally unique a molecule is within this batch (1.0 is very unique).\n"
+f"- hybrid: A guiding score calculated as {alpha:.2f}*dense_proto + {beta:.2f}*sparse_proto + {gamma:.2f}*diversity.\n"
+f"- neighbors: Up to 5 most similar molecules from previous generations and their real oracle scores, providing historical context.\n"
+"\n"
+"Your task is a two-step thinking process:\n"
+"1.  **Rationale**: First, write a brief analysis of the candidates. Your goal is to select EXACTLY 10 molecules that are most promising for further optimization. A strong selection must balance two objectives:\n"
+"    - **Exploitation**: Choose candidates with high `hybrid` scores, especially those similar to historically high-scoring neighbors. These are likely to perform well.\n"
+"    - **Exploration**: Choose some candidates with high `diversity` scores, even if their `hybrid` score isn't the highest. These unique structures are crucial for discovering new, potentially better chemical families.\n"
+"    - Identify and mention groups of candidates that are too similar to each other to avoid over-selecting from one chemical family.\n"
+"2.  **Selection**: After providing your rationale, on a new line, output your final selection of 10 indices as a JSON array.\n"
+"\n"
+"The final line of your response MUST be the JSON array of 10 integers.\n"
     )
     fs = ""
     if few_shot:
@@ -367,14 +377,22 @@ f"You are given 30 candidate SMILES of generation {g}. Each candidate includes:\
 
     lines = []
     for c in candidates:
-        nbr = "; ".join([f"{n['smiles']}|score={n['score']:.3f}|d={n['dense_sim']:.3f}|t={n['tanimoto']:.3f}"
-                         for n in c.get("neighbors",[])])
+        nbr_strs = []
+        for n in c.get("neighbors",[]):
+            # Format score to 2 decimal places for brevity
+            nbr_strs.append(f"{n['smiles']}|score={n['score']:.2f}")
+        nbr_str = "; ".join(nbr_strs)
+
         lines.append(
-            f"{c['idx']:>2d}. SMILES={c['smiles']} | dense_proto={c['dense_proto']:.3f} | "
-            f"sparse_proto={c['sparse_proto']:.3f} | hybrid={c['hybrid']:.3f} | neighbors=[{nbr}]"
+            f"{c['idx']:>2d}. SMILES={c['smiles']} | "
+            f"dense_proto={c['dense_proto']:.3f} | "
+            f"sparse_proto={c['sparse_proto']:.3f} | "
+            f"diversity={c.get('diversity', 0.0):.3f} | " # NEW
+            f"hybrid={c['hybrid']:.3f} | "
+            f"neighbors=[{nbr_str}]"
         )
     body = "\n".join(lines)
-    tail = "\nOutput format example:\n[1,5,8,12,15,19,21,23,27,30]\n"
+    tail = "\nRationale:\n<Your analysis here...>\n\nSelection:\n[1, 5, 8, 12, 15, 19, 21, 23, 27, 30]"
     return head + fs + body + tail
 
 def parse_llm_selection(text: str, max_idx: int) -> List[int]:
@@ -438,7 +456,7 @@ class LLMWrapper:
             while True:
                 try:
                     stream = self.client.chat.completions.create(
-                        messages=[{"role":"system", "content":"You are a precise model selection agent. Output only JSON array of 10 integers."},
+                        messages=[{"role":"system", "content":"You are a medicinal chemistry expert."},
                                   {"role":"user", "content":prompt}],
                         model=self.model,
                         stream=True,
@@ -476,6 +494,7 @@ def build_prototypes(g:int, gens:Dict[int,List[Rec]], proto_topN:int, proto_wind
             seen.add(s); u.append(s)
     return u
 
+# MODIFIED: Added diversity score calculation
 def build_evidence_for_generation(
     g: int,
     task: str,
@@ -484,6 +503,7 @@ def build_evidence_for_generation(
     memory: MemoryStore,
     alpha: float,
     beta: float,
+    gamma: float, # NEW
     topK_emit: int = 30,
     neighbors_k: int = 5,
 ) -> Tuple[List[Dict], Dict]:
@@ -493,7 +513,6 @@ def build_evidence_for_generation(
       raw_evidence: 任務內部紀錄（可另存 jsonl）
     """
     recs = gens.get(g, [])
-    # 保守處理：實務上每代就是 30
     recs = recs[:topK_emit]
     protos = build_prototypes(g, gens, proto_topN=20, proto_window=5)
 
@@ -507,26 +526,49 @@ def build_evidence_for_generation(
         Pon = np.asarray([x["on"] for x in pfps], dtype=np.int32)
     else:
         vp = None; P=None; Pon=None
+    
+    # --- NEW: Diversity Calculation ---
+    # 1. First, get all representations for the current batch
+    batch_reps = [encoder.embed_smiles(r.smiles, use_cache=True) for r in recs]
+    batch_fps = np.array([rep['fp'] for rep in batch_reps])
+    batch_ons = np.array([rep['on'] for rep in batch_reps])
+    
+    diversity_scores = []
+    if len(recs) > 1:
+        # 2. Calculate pairwise Tanimoto similarity matrix for the batch
+        sim_matrix = np.zeros((len(recs), len(recs)), dtype=np.float32)
+        for i in range(len(recs)):
+            sim_matrix[i, :] = tanimoto_bool(batch_fps[i], batch_fps, batch_ons[i], batch_ons)
+        
+        # 3. For each molecule, find max similarity to others (excluding self)
+        np.fill_diagonal(sim_matrix, 0) # Exclude self-similarity
+        max_sim_to_others = sim_matrix.max(axis=1)
+        
+        # 4. Diversity score is 1 - max similarity
+        diversity_scores = 1.0 - max_sim_to_others
+    else:
+        diversity_scores = [1.0] * len(recs) # If only one candidate, it's perfectly diverse
 
     cands=[]
     ev_all={}
-    for idx1, r in enumerate(recs, start=1):
-        rep = encoder.embed_smiles(r.smiles, use_cache=True)
+    for idx, (r, rep, div_score) in enumerate(zip(recs, batch_reps, diversity_scores)):
+        idx1 = idx + 1
         dsim = cosine(rep["dense"], vp) if vp is not None else 0.0
         tsim = 0.0
         if P is not None:
             tsim = float(tanimoto_bool(rep["fp"], P, rep["on"], Pon).max())
-        hybrid = alpha*dsim + beta*tsim
+        
+        # MODIFIED: New hybrid score including diversity
+        hybrid = alpha*dsim + beta*tsim + gamma*div_score
 
         # neighbors from history (< g)
         nbr_idx = memory.knn_dense(rep["dense"], topk=max(50, neighbors_k*5), forbid_gen=g)
-        # re-rank by hybrid to reduce false positives
         neighbors=[]
         for j in nbr_idx:
             td = float(np.dot(rep["dense"], memory.dense[j]))
             tt = float(tanimoto_bool(rep["fp"], memory.fp[j:j+1], rep["on"], memory.on[j:j+1])[0])
             score_j = float(memory.scores[j])
-            hybrid_j = alpha*td + beta*tt
+            hybrid_j = alpha*td + beta*tt # Note: neighbor re-ranking doesn't use diversity
             neighbors.append((hybrid_j, j, td, tt, score_j))
         neighbors.sort(key=lambda x: -x[0])
         neighbors = neighbors[:neighbors_k]
@@ -538,12 +580,14 @@ def build_evidence_for_generation(
             "smiles": r.smiles,
             "dense_proto": float(dsim),
             "sparse_proto": float(tsim),
+            "diversity": float(div_score), # NEW
             "hybrid": float(hybrid),
             "neighbors": nb_pack
         })
-        ev_all[r.smiles] = {"dense_proto": float(dsim), "sparse_proto": float(tsim), "neighbors": nb_pack}
+        ev_all[r.smiles] = {"dense_proto": float(dsim), "sparse_proto": float(tsim), "diversity": float(div_score), "neighbors": nb_pack}
 
     return cands, ev_all
+
 
 # ------------------- Main pipeline -------------------
 def run(args):
@@ -604,27 +648,27 @@ def run(args):
     last_calibrated_meta: Optional[Tuple[int, int]] = None
     fusion_path = os.path.join(args.outdir, "fusion_weights.json")
 
+    # MODIFIED: Assign alpha, beta, gamma from args
+    alpha, beta, gamma = args.alpha, args.beta, args.gamma
+    
     if args.calibrate:
         if args.calibrate_interval <= 0:
             initial_upto = max(gens.keys()) if gens else None
             res = calibrate_history(initial_upto)
             if res:
+                # NOTE: Calibration only provides alpha and beta. Gamma is still taken from args.
                 alpha, beta, hist_start, hist_end = res
                 last_calibrated_upto = hist_end
                 last_calibrated_meta = (hist_start, hist_end)
                 print(f"[Calibrate] alpha={alpha:.3f}, beta={beta:.3f} (history gens {hist_start}-{hist_end})")
             else:
-                alpha, beta = args.alpha, args.beta
-                print("[Calibrate] insufficient history, falling back to provided alpha/beta")
+                print("[Calibrate] insufficient history, falling back to provided alpha/beta/gamma")
         else:
-            alpha, beta = args.alpha, args.beta
             window_desc = args.calibrate_window if args.calibrate_window else 'all'
-            print(f"[Calibrate] will refresh every {args.calibrate_interval} generations (min_history={args.calibrate_min_history}, window={window_desc})")
-    else:
-        alpha, beta = args.alpha, args.beta
-
-    print(f"[Config] alpha={alpha}, beta={beta}")
-    meta_payload = {"alpha": alpha, "beta": beta}
+            print(f"[Calibrate] will refresh alpha/beta every {args.calibrate_interval} generations (min_history={args.calibrate_min_history}, window={window_desc})")
+    
+    print(f"[Config] alpha={alpha}, beta={beta}, gamma={gamma}")
+    meta_payload = {"alpha": alpha, "beta": beta, "gamma": gamma}
     if last_calibrated_meta:
         meta_payload.update({"history_start": last_calibrated_meta[0], "history_end": last_calibrated_meta[1]})
     with open(fusion_path, "w") as f:
@@ -658,7 +702,7 @@ def run(args):
     evidence_path = os.path.join(args.outdir, "retrieved_evidence.jsonl")
     ev_f = open(evidence_path, "w", encoding="utf-8")
 
-    # 逐代處理（關鍵：LLM 做 30→10）
+    # 逐代處理
     for g in sorted(gens.keys()):
         if args.calibrate and args.calibrate_interval > 0:
             history_g = [k for k in gens.keys() if k < g and len(gens[k]) > 0]
@@ -669,22 +713,22 @@ def run(args):
                     last_calibrated_upto = hist_end
                     last_calibrated_meta = (hist_start, hist_end)
                     print(f"[Calibrate] updated alpha={alpha:.3f}, beta={beta:.3f} using gens {hist_start}-{hist_end}")
-                    meta_payload = {"alpha": alpha, "beta": beta, "history_start": hist_start, "history_end": hist_end}
+                    meta_payload = {"alpha": alpha, "beta": beta, "gamma": gamma, "history_start": hist_start, "history_end": hist_end}
                     with open(fusion_path, "w") as f:
                         json.dump(meta_payload, f, indent=2)
 
         # 構建當代 30 的證據（只使用 <g 的歷史）
         cands, ev = build_evidence_for_generation(
-            g, args.task, gens, enc, memory, alpha, beta,
+            g, args.task, gens, enc, memory, alpha, beta, gamma,
             topK_emit=args.topK, neighbors_k=args.neighbors_k
         )
 
-        # 寫入 jsonl（LLM 亦可直接用此 jsonl 作為輸入）
+        # 寫入 jsonl
         ev_line = {"generation": g, "candidates": cands}
         ev_f.write(json.dumps(ev_line, ensure_ascii=False) + "\n")
 
         # 構建 prompt → LLM
-        prompt = make_llm_prompt(g, args.task, cands, alpha, beta, few_shot=None)
+        prompt = make_llm_prompt(g, args.task, cands, alpha, beta, gamma, few_shot=None)
         print(f"[Prompt Gen {g}] >>>")
         print(prompt)
         raw = llm.generate(prompt)
@@ -726,12 +770,11 @@ def build_argparser():
     ap = argparse.ArgumentParser()
     ap.add_argument("--task", type=str, default="amlodipine")
     ap.add_argument("--csv", type=str, help="path to CSV: generation,smiles,score", default="data/offspring/amlodipine.csv")
-    ap.add_argument("--outdir", type=str, default="results/ChemBERTa_RAG")
+    ap.add_argument("--outdir", type=str, default="results/ChemBERTa_RAG_Optimized") # MODIFIED: Changed default outdir
     ap.add_argument("--max-generation", dest="max_generation", type=int, default=None,
                     help="Only load/process generations <= this value")
     # encoder / fingerprints
     ap.add_argument("--model-name", type=str, default="seyonec/ChemBERTa-zinc-base-v1")
-    # Default to CPU to avoid touching torch at arg-parse time on old systems
     ap.add_argument("--device", type=str, default="cpu")
     ap.add_argument("--dense-pool", type=str, default="mean", choices=["mean","cls"])
     ap.add_argument("--random-smiles-n", type=int, default=4)
@@ -745,8 +788,10 @@ def build_argparser():
     ap.add_argument("--proto-topN", type=int, default=20)
     ap.add_argument("--proto-window", type=int, default=5)
     # fusion
-    ap.add_argument("--alpha", type=float, default=0.6)
-    ap.add_argument("--beta", type=float, default=0.4)
+    # MODIFIED: Adjusted defaults to include gamma
+    ap.add_argument("--alpha", type=float, default=0.5, help="Weight for dense prototype similarity.")
+    ap.add_argument("--beta", type=float, default=0.3, help="Weight for sparse prototype similarity.")
+    ap.add_argument("--gamma", type=float, default=0.2, help="Weight for diversity score.") # NEW
     ap.add_argument("--calibrate", action="store_true")
     ap.add_argument("--calibrate-interval", type=int, default=0,
                     help="Recompute alpha/beta every N generations (0=only once).")
